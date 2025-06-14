@@ -1,4 +1,4 @@
-// File: container_step2.c
+// File: container_step2_fixed.c
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,31 +8,32 @@
 #include <unistd.h>
 #include <sys/mount.h>
 
-#define STACK_SIZE (1024 * 1024) // 1 MB stack
+#define STACK_SIZE (1024 * 1024)
 
-// Function to be executed by the container
 int container_main(void *arg) {
     printf("--> In container_main: child process started.\n");
 
-    // Set a new hostname
-    printf(in
-    "--> Setting hostname to 'container'...\n");
     sethostname("container", 9);
 
-    // Remount /proc to make the new PID namespace work correctly
-    printf("--> Mounting /proc...\n");
-    if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
-        perror("mount");
-        // We exit because ps, top, etc. won't work without /proc
+    // This is the CRITICAL fix to prevent mount events from propagating to the host
+    printf("--> Making root mount private...\n");
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) {
+        perror("Failed to make root mount private");
         exit(EXIT_FAILURE);
     }
 
+    // Now we can safely mount /proc for the container
+    printf("--> Mounting /proc...\n");
+    if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
+        perror("Failed to mount /proc");
+        exit(EXIT_FAILURE);
+    }
+    
     printf("--> Ready to execute user command.\n");
     
     char **argv = (char **)arg;
     execv(argv[0], argv);
     
-    // execv only returns on error
     perror("execv failed");
     exit(EXIT_FAILURE);
 }
@@ -46,13 +47,12 @@ int main(int argc, char *argv[]) {
     printf("--> Parent: starting container...\n");
 
     char *container_stack = malloc(STACK_SIZE);
-    if (container_stack == NULL) {
+    if (!container_stack) {
         perror("malloc");
         exit(EXIT_FAILURE);
     }
     char *stack_top = container_stack + STACK_SIZE;
 
-    // Flags for clone()
     int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD;
 
     pid_t container_pid = clone(container_main, stack_top, clone_flags, &argv[1]);
