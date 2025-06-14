@@ -24,5 +24,4 @@ This project aims to implement a container runtime system that operates without 
 ## Getting Started
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/container-runtime-system.git
-   cd container-runtime-system
+   git clone https://github.com/NikaGhaderi/Container-Runtime-System.git
