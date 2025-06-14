@@ -1,54 +1,73 @@
-// This is a conceptual C code snippet
+// File: container_step2.c
 #define _GNU_SOURCE
-#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sched.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <sys/mount.h>
 
+#define STACK_SIZE (1024 * 1024) // 1 MB stack
 
-
-// Function that will be executed by the container process
+// Function to be executed by the container
 int container_main(void *arg) {
-    printf("Inside the container!\n");
-    // Set a new hostname for this container
-    sethostname("my-container", 12);
-    // Execute the user's command, e.g., /bin/sh
+    printf("--> In container_main: child process started.\n");
+
+    // Set a new hostname
+    printf("--> Setting hostname to 'container'...\n");
+    sethostname("container", 9);
+
+    // Remount /proc to make the new PID namespace work correctly
+    printf("--> Mounting /proc...\n");
+    if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
+        perror("mount");
+        // We exit because ps, top, etc. won't work without /proc
+        exit(EXIT_FAILURE);
+    }
+
+    printf("--> Ready to execute user command.\n");
+    
     char **argv = (char **)arg;
     execv(argv[0], argv);
-    printf("Oops, execv failed!\n");
-    return 1;
+    
+    // execv only returns on error
+    perror("execv failed");
+    exit(EXIT_FAILURE);
 }
 
 int main(int argc, char *argv[]) {
-    // Command to run inside container is passed as arguments
-    // e.g., ./my-runner /bin/sh
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <command>\n", argv[0]);
-        exit(1);
+        fprintf(stderr, "Usage: %s <command> [args...]\n", argv[0]);
+        exit(EXIT_FAILURE);
     }
 
-    char *stack = malloc(4096); // Allocate stack for the new process
-    if (!stack) exit(1);
-    char *stack_top = stack + 4096;
+    printf("--> Parent: starting container...\n");
 
-    // Flags to create new namespaces
-    int flags = CLONE_NEWPID |  // New PID namespace
-                CLONE_NEWNS |   // New Mount namespace
-                CLONE_NEWUTS |  // New UTS (hostname) namespace
-                CLONE_NEWUSER;  // New User namespace
+    char *container_stack = malloc(STACK_SIZE);
+    if (container_stack == NULL) {
+        perror("malloc");
+        exit(EXIT_FAILURE);
+    }
+    char *stack_top = container_stack + STACK_SIZE;
 
-    // clone() creates the new process
-    pid_t pid = clone(container_main, stack_top, flags | SIGCHLD, &argv[1]);
+    // Flags for clone()
+    int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD;
 
-    if (pid == -1) {
+    pid_t container_pid = clone(container_main, stack_top, clone_flags, &argv[1]);
+
+    if (container_pid == -1) {
         perror("clone");
-        exit(1);
+        free(container_stack);
+        exit(EXIT_FAILURE);
     }
 
-    // The parent process waits for the container to exit
-    waitpid(pid, NULL, 0);
+    printf("--> Parent: container created with host PID %d.\n", container_pid);
 
-    free(stack);
+    waitpid(container_pid, NULL, 0);
+
+    printf("--> Parent: container has terminated.\n");
+
+    free(container_stack);
     return 0;
 }
