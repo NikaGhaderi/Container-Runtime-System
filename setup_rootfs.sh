@@ -1,35 +1,82 @@
 #!/bin/bash
 
-# A script to create a minimal rootfs for our container
-
+# A script to create a more complete rootfs for our container
 # Exit if any command fails
 set -e
 
 ROOTFS_DIR="my-container-rootfs"
 
-echo "--> Creating root filesystem at ./${ROOTFS_DIR}"
+# --- List of essential commands to include in the container ---
+# This is the main part you might want to edit in the future
+# to add more commands.
+COMMANDS=(
+    "/bin/bash"
+    "/bin/ls"
+    "/bin/cat"
+    "/bin/echo"
+    "/bin/ps"
+    "/bin/touch"
+    "/bin/rm"
+    "/bin/mkdir"
+    "/bin/mount"
+    "/bin/umount"
+    "/usr/bin/free"
+    "/usr/bin/head"
+    "/usr/bin/tail"
+)
 
-# Create the directory if it doesn't exist
+# --- End of commands list ---
+
+
+# Function to copy a binary and its library dependencies
+copy_binary_with_deps() {
+    local binary_path="$1"
+    
+    if [ ! -f "$binary_path" ]; then
+        echo "--> WARNING: Command not found on host system: $binary_path"
+        return
+    fi
+    
+    echo "--> Copying binary: $binary_path"
+    
+    # Copy the binary itself
+    local dest_binary="${ROOTFS_DIR}${binary_path}"
+    mkdir -p "$(dirname "$dest_binary")"
+    cp "$binary_path" "$dest_binary"
+
+    # Copy the required libraries
+    for lib in $(ldd "$binary_path" | awk 'NF == 4 {print $3}; NF == 2 {print $1}'); do
+        if [ ! -f "$lib" ]; then
+            continue # Skip non-existent files like linux-vdso.so
+        fi
+        
+        local dest_lib="${ROOTFS_DIR}${lib}"
+        if [ ! -f "$dest_lib" ]; then
+            echo "    - Copying library: $lib"
+            mkdir -p "$(dirname "$dest_lib")"
+            cp "$lib" "$dest_lib"
+        fi
+    done
+}
+
+
+# --- Main script execution ---
+
+echo "--> Setting up root filesystem at ./${ROOTFS_DIR}"
+
 if [ -d "$ROOTFS_DIR" ]; then
-    echo "--> Directory already exists. Clearing it."
-    rm -rf "$ROOTOTS_DIR"
+    echo "--> Directory already exists. Recreating it."
+    rm -rf "$ROOTFS_DIR"
 fi
 
-mkdir -p "${ROOTFS_DIR}"/{bin,lib,lib64}
+# Create a basic directory structure
+mkdir -p "${ROOTFS_DIR}"/{bin,lib,lib64,usr/bin,proc}
+# /proc is needed for mount and ps
 
-echo "--> Copying bash and its libraries"
-
-# Copy bash
-cp /bin/bash "${ROOTFS_DIR}/bin/"
-
-# Copy the required libraries
-# Use ldd to find the libraries required by bash and copy them over
-for lib in $(ldd /bin/bash | grep -o '/lib.*\s'); do
-    # Make sure the destination directory exists
-    DEST_DIR="${ROOTFS_DIR}$(dirname ${lib})"
-    mkdir -p "$DEST_DIR"
-    # Copy the library
-    cp "${lib}" "${DEST_DIR}/"
+# Loop through our list of commands and copy each one
+for cmd in "${COMMANDS[@]}"; do
+    copy_binary_with_deps "$cmd"
 done
 
 echo "--> Rootfs setup complete."
+echo "--> You can now run your container."
