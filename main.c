@@ -15,7 +15,8 @@ int container_main(void *arg) {
     printf("--> In container_main: child process started.\n");
 
     // Set a new hostname
-    printf("--> Setting hostname to 'container'...\n");
+    printf(in
+    "--> Setting hostname to 'container'...\n");
     sethostname("container", 9);
 
     // Remount /proc to make the new PID namespace work correctly
