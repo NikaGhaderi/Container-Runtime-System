@@ -6,6 +6,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+
+
 // Function that will be executed by the container process
 int container_main(void *arg) {
     printf("Inside the container!\n");
@@ -25,11 +27,11 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Usage: %s <command>\n", argv[0]);
         exit(1);
     }
-    
+
     char *stack = malloc(4096); // Allocate stack for the new process
     if (!stack) exit(1);
     char *stack_top = stack + 4096;
-    
+
     // Flags to create new namespaces
     int flags = CLONE_NEWPID |  // New PID namespace
                 CLONE_NEWNS |   // New Mount namespace
@@ -38,15 +40,15 @@ int main(int argc, char *argv[]) {
 
     // clone() creates the new process
     pid_t pid = clone(container_main, stack_top, flags | SIGCHLD, &argv[1]);
-    
+
     if (pid == -1) {
         perror("clone");
         exit(1);
     }
-    
+
     // The parent process waits for the container to exit
     waitpid(pid, NULL, 0);
-    
+
     free(stack);
     return 0;
 }
