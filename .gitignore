@@ -1,0 +1,4 @@
+# .gitignore
+
+# Ignore the container root filesystem directory
+/my-container-rootfs/

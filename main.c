@@ -1,4 +1,4 @@
-// File: container_step2_fixed.c
+// File: container_step3_chroot.c
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,63 +11,71 @@
 #define STACK_SIZE (1024 * 1024)
 
 int container_main(void *arg) {
-    printf("--> In container_main: child process started.\n");
+    printf("[CHILD] --> Process started.\n");
 
     sethostname("container", 9);
+    
+    // Path to the new rootfs is passed as the first argument
+    char *rootfs = ((char **)arg)[0];
 
-    // This is the CRITICAL fix to prevent mount events from propagating to the host
-    printf("--> Making root mount private...\n");
-    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) {
-        perror("Failed to make root mount private");
-        exit(EXIT_FAILURE);
+    // Chroot: Change the root directory
+    if (chroot(rootfs) != 0) {
+        perror("chroot failed");
+        return 1;
+    }
+    printf("[CHILD] --> Root directory changed to: %s\n", rootfs);
+
+    // Chdir: Change the current working directory to the new root
+    if (chdir("/") != 0) {
+        perror("chdir failed");
+        return 1;
     }
 
-    // Now we can safely mount /proc for the container
-    printf("--> Mounting /proc...\n");
-    if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
-        perror("Failed to mount /proc");
-        exit(EXIT_FAILURE);
-    }
-    
-    printf("--> Ready to execute user command.\n");
-    
-    char **argv = (char **)arg;
+    // Remount /proc. It MUST be done AFTER chroot.
+    mount("proc", "/proc", "proc", 0, NULL);
+
+    // We execute the command passed AFTER the rootfs path
+    char **argv = &(((char **)arg)[1]);
     execv(argv[0], argv);
     
-    perror("execv failed");
-    exit(EXIT_FAILURE);
+    perror("[CHILD] !!! execv FAILED");
+    return 1;
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <command> [args...]\n", argv[0]);
+    // We now need at least 3 arguments: ./program <rootfs_path> <command>
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s <rootfs_path> <command> [args...]\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
-    printf("--> Parent: starting container...\n");
+    printf("[PARENT] --> Starting container...\n");
 
     char *container_stack = malloc(STACK_SIZE);
     if (!container_stack) {
-        perror("malloc");
+        perror("[PARENT] malloc failed");
         exit(EXIT_FAILURE);
     }
     char *stack_top = container_stack + STACK_SIZE;
 
     int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD;
-
+    
+    // We pass all arguments from index 1 onwards to the child
     pid_t container_pid = clone(container_main, stack_top, clone_flags, &argv[1]);
 
     if (container_pid == -1) {
-        perror("clone");
+        perror("[PARENT] clone failed");
         free(container_stack);
         exit(EXIT_FAILURE);
     }
 
-    printf("--> Parent: container created with host PID %d.\n", container_pid);
+    printf("[PARENT] --> Container created with host PID %d.\n", container_pid);
 
-    waitpid(container_pid, NULL, 0);
+    int child_status;
+    waitpid(container_pid, &child_status, 0);
 
-    printf("--> Parent: container has terminated.\n");
+    int exit_code = WIFEXITED(child_status) ? WEXITSTATUS(child_status) : -1;
+    printf("[PARENT] --> Container terminated with exit code: %d\n", exit_code);
 
     free(container_stack);
     return 0;
