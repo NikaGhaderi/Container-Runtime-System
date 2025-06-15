@@ -1,4 +1,4 @@
-// File: container_final.c
+// File: container_final_v2.c
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,12 +10,11 @@
 #include <sys/stat.h>
 #include <string.h>
 #include <errno.h>
-#include <limits.h> // For PATH_MAX
+#include <limits.h>
 
 #define STACK_SIZE (1024 * 1024)
 #define MY_RUNTIME_CGROUP "/sys/fs/cgroup/my_runtime"
 
-// Helper function to write a string to a file
 void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
     if (f == NULL) {
@@ -27,11 +26,8 @@ void write_file(const char *path, const char *content) {
     fclose(f);
 }
 
-// Function to handle one-time setup of our main cgroup
 void setup_cgroup_hierarchy() {
-    if (access(MY_RUNTIME_CGROUP, F_OK) == 0) {
-        return; // Already exists
-    }
+    if (access(MY_RUNTIME_CGROUP, F_OK) == 0) return;
     if (mkdir(MY_RUNTIME_CGROUP, 0755) != 0 && errno != EEXIST) {
         perror("mkdir my_runtime failed");
         return;
@@ -66,15 +62,11 @@ int main(int argc, char *argv[]) {
     char *cpu_quota = NULL;
     int opt;
 
-    // BUG FIX: Changed CPU option from 'c' to 'C' to avoid conflict
-    while ((opt = getopt(argc, argv, "m:C:")) != -1) {
+    // FINAL BUG FIX: Add '+' to enforce strict option parsing.
+    while ((opt = getopt(argc, argv, "+m:C:")) != -1) {
         switch (opt) {
-            case 'm':
-                mem_limit = optarg;
-                break;
-            case 'C': // Changed from 'c'
-                cpu_quota = optarg;
-                break;
+            case 'm': mem_limit = optarg; break;
+            case 'C': cpu_quota = optarg; break;
             default:
                 fprintf(stderr, "Usage: %s [-m mem_limit] [-C cpu_quota] <rootfs> <cmd> [args]\n", argv[0]);
                 exit(EXIT_FAILURE);
@@ -112,15 +104,12 @@ int main(int argc, char *argv[]) {
         perror("mkdir cgroup failed");
     } else {
         printf("[PARENT] --> Cgroup created at %s\n", cgroup_path);
-
         char procs_path[PATH_MAX];
         char pid_str[16];
         snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
         snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
         write_file(procs_path, pid_str);
-
-        // BUG FIX: Add a small delay to prevent race condition
-        usleep(10000); // 10 milliseconds
+        usleep(10000);
 
         if (mem_limit) {
             char mem_path[PATH_MAX];
@@ -128,7 +117,6 @@ int main(int argc, char *argv[]) {
             write_file(mem_path, mem_limit);
             printf("[PARENT] --> Set memory limit to %s\n", mem_limit);
         }
-
         if (cpu_quota) {
             char cpu_path[PATH_MAX];
             char cpu_content[64];
