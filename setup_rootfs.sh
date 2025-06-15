@@ -6,25 +6,24 @@ set -e
 
 ROOTFS_DIR="my-container-rootfs"
 
-# --- NEW CLEANUP LOGIC ---
-# Before we do anything, check if the old rootfs exists and clean up any mounts.
+# --- NEW & IMPROVED CLEANUP LOGIC ---
 if [ -d "$ROOTFS_DIR" ]; then
     echo "--> Found existing rootfs. Cleaning up old mounts..."
     
-    # Check if proc is mounted and unmount it if it is.
-    # The 'mountpoint -q' command is a quiet test.
+    # Check if proc is mounted and perform a forced, lazy unmount.
     if mountpoint -q "${ROOTFS_DIR}/proc"; then
-        echo "--> Unmounting old procfs."
+        echo "--> Aggressively unmounting old procfs."
+        # The -f (force) and -l (lazy) flags are key here.
+        # The '|| true' ensures the script doesn't exit if umount fails (e.g., not mounted).
         umount -f -l "${ROOTFS_DIR}/proc" || true
     fi
-    
-    # We could add more checks here for other potential mounts in the future.
 fi
 # --- END OF NEW CLEANUP LOGIC ---
 
 
 echo "--> Setting up root filesystem at ./${ROOTFS_DIR}"
 
+# This rm command should now succeed
 if [ -d "$ROOTFS_DIR" ]; then
     echo "--> Clearing old directory."
     rm -rf "$ROOTFS_DIR"
@@ -45,7 +44,7 @@ COMMANDS=(
     "/usr/bin/free"
     "/usr/bin/head"
     "/usr/bin/tail"
-    "/usr/bin/stress" # Make sure stress is in the list
+    "/usr/bin/stress"
 )
 
 # Function to copy a binary and its library dependencies
