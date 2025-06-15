@@ -23,6 +23,7 @@ COMMANDS=(
     "/usr/bin/free"
     "/usr/bin/head"
     "/usr/bin/tail"
+    "/usr/bin/stress"
 )
 
 # --- End of commands list ---
