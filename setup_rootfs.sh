@@ -15,7 +15,7 @@ if [ -d "$ROOTFS_DIR" ]; then
     # The 'mountpoint -q' command is a quiet test.
     if mountpoint -q "${ROOTFS_DIR}/proc"; then
         echo "--> Unmounting old procfs."
-        umount "${ROOTFS_DIR}/proc"
+        umount -f -l "${ROOTFS_DIR}/proc" || true
     fi
     
     # We could add more checks here for other potential mounts in the future.
