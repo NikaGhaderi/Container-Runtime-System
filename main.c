@@ -1,6 +1,5 @@
-// File: container_step5_final_v2.c
-// Only the do_run function has a small but critical change.
-
+// File: container_step5_final_v3.c
+// All includes and helper functions are the same.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,11 +15,11 @@
 #include <getopt.h>
 #include <dirent.h>
 
-// All helper functions and other `do_` functions are the same.
 #define STACK_SIZE (1024 * 1024)
 #define MY_RUNTIME_CGROUP "/sys/fs/cgroup/my_runtime"
 #define MY_RUNTIME_STATE "/run/my_runtime"
 #define NEXT_CPU_FILE "/tmp/my_runtime_next_cpu"
+
 void write_file(const char *path, const char *content) { /* ... same ... */
     FILE *f = fopen(path, "w"); if (f == NULL) { fprintf(stderr, "Failed to open %s: ", path); perror(""); return; } fprintf(f, "%s", content); fclose(f);
 }
@@ -32,20 +31,55 @@ int container_main(void *arg) { /* ... same ... */
 }
 
 int do_run(int argc, char *argv[]) {
-    // Most of this function is the same
     setup_cgroup_hierarchy();
-    if (mkdir(MY_RUNTIME_STATE, 0755) != 0 && errno != EEXIST) { perror("mkdir runtime state dir failed"); return 1; }
-    char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0;
-    static struct option long_options[] = { {"pin-cpu", no_argument, NULL, 'p'}, {0, 0, 0, 0} };
-    int option_index = 0; int opt;
-    while ((opt = getopt_long(argc, argv, "+m:C:p", long_options, &option_index)) != -1) {
+    if (mkdir(MY_RUNTIME_STATE, 0755) != 0 && errno != EEXIST) {
+        perror("mkdir runtime state dir failed"); return 1;
+    }
+    
+    char *mem_limit = NULL;
+    char *cpu_quota = NULL;
+    int pin_cpu_flag = 0;
+    int detach_flag = 0; // Our new flag
+
+    static struct option long_options[] = {
+        {"pin-cpu", no_argument, NULL, 'p'},
+        {"detach",  no_argument, NULL, 'd'}, // New --detach option
+        {0, 0, 0, 0}
+    };
+    int option_index = 0;
+    int opt;
+
+    // Add 'd' to the optstring
+    while ((opt = getopt_long(argc, argv, "+m:C:pd", long_options, &option_index)) != -1) {
         switch (opt) {
-            case 'm': mem_limit = optarg; break; case 'C': cpu_quota = optarg; break; case 'p': pin_cpu_flag = 1; break; default:
-            fprintf(stderr, "Usage: %s run [-m mem] [-C quota] [--pin-cpu] <rootfs> <cmd>\n", argv[0]); return 1;
+            case 'm': mem_limit = optarg; break;
+            case 'C': cpu_quota = optarg; break;
+            case 'p': pin_cpu_flag = 1; break;
+            case 'd': detach_flag = 1; break; // Set the detach flag
+            default:
+                fprintf(stderr, "Usage: %s run [--detach] ...\n", argv[0]);
+                return 1;
         }
     }
-    if (optind + 1 >= argc) { fprintf(stderr, "Usage: %s run [-m mem] [-C quota] [--pin-cpu] <rootfs> <cmd>\n", argv[0]); return 1; }
+
+    if (optind + 1 >= argc) {
+        fprintf(stderr, "Usage: %s run [--detach] ...\n", argv[0]);
+        return 1;
+    }
+    
+    // --- NEW: Detach from terminal if requested ---
+    if (detach_flag) {
+        printf("Detaching container. PID will follow.\n");
+        fflush(stdout); // Make sure the above message prints before we detach
+        
+        // Redirect standard streams to /dev/null
+        freopen("/dev/null", "r", stdin);
+        freopen("/dev/null", "w", stdout);
+        freopen("/dev/null", "w", stderr);
+    }
+    
     char **container_argv = &argv[optind];
+    // ... all the logic for clone, cgroup, state dir, etc. is the same ...
     printf("[PARENT] --> Starting container...\n");
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
@@ -66,15 +100,15 @@ int do_run(int argc, char *argv[]) {
     if (cpu_quota) { /* ... cpu limit logic is the same ... */
         char cpu_path[PATH_MAX]; char cpu_content[64]; snprintf(cpu_path, sizeof(cpu_path), "%s/cpu.max", cgroup_path); snprintf(cpu_content, sizeof(cpu_content), "%s 100000", cpu_quota); write_file(cpu_path, cpu_content);
     }
+    char procs_path[PATH_MAX]; char pid_str[16]; snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path); snprintf(pid_str, sizeof(pid_str), "%d", container_pid); write_file(procs_path, pid_str);
     
-    // --- THIS IS THE BUG FIX ---
-    char procs_path[PATH_MAX];
-    char pid_str[16]; // The variable to hold the PID string
-    snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
-    snprintf(pid_str, sizeof(pid_str), "%d", container_pid); // Put the container's PID into the string
-    write_file(procs_path, pid_str); // Write the correct PID string
-    // --- END OF BUG FIX ---
-    
+    // If detached, the parent can exit immediately.
+    if (detach_flag) {
+        printf("%d\n", container_pid); // Print the PID for scripting
+        return 0;
+    }
+
+    // Otherwise, wait for the container to finish.
     int child_status;
     waitpid(container_pid, &child_status, 0);
     rmdir(state_dir);
@@ -83,7 +117,7 @@ int do_run(int argc, char *argv[]) {
     return WIFEXITED(child_status) ? WEXITSTATUS(child_status) : -1;
 }
 
-// All other functions (`do_list`, `do_status`, `main`) are unchanged
+// All other functions are the same
 int do_list(int argc, char *argv[]) { /* ... same ... */
     DIR *d = opendir(MY_RUNTIME_STATE); if (d == NULL) { perror("opendir runtime state"); return 1; } printf("CONTAINER PID\tCOMMAND\n"); struct dirent *dir_entry; while ((dir_entry = readdir(d)) != NULL) { if (dir_entry->d_type == DT_DIR && strcmp(dir_entry->d_name, ".") != 0 && strcmp(dir_entry->d_name, "..") != 0) { char proc_path[PATH_MAX]; snprintf(proc_path, sizeof(proc_path), "/proc/%s", dir_entry->d_name); if (access(proc_path, F_OK) == 0) { char cmd_path[PATH_MAX]; char cmd_buf[1024] = {0}; snprintf(cmd_path, sizeof(cmd_path), "%s/%s/command", MY_RUNTIME_STATE, dir_entry->d_name); FILE *cmd_file = fopen(cmd_path, "r"); if (cmd_file) { fgets(cmd_buf, sizeof(cmd_buf), cmd_file); fclose(cmd_file); } printf("%-15s\t%s", dir_entry->d_name, cmd_buf); } } } closedir(d); return 0;
 }
