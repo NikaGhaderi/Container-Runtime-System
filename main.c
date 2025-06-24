@@ -1,4 +1,4 @@
-// File: container_minimal_test.c
+// File: container_stable_with_detach.c
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,92 +11,202 @@
 #include <string.h>
 #include <errno.h>
 #include <limits.h>
+#include <getopt.h>
+#include <dirent.h>
 
 #define STACK_SIZE (1024 * 1024)
 #define MY_RUNTIME_CGROUP "/sys/fs/cgroup/my_runtime"
+#define MY_RUNTIME_STATE "/run/my_runtime"
+#define NEXT_CPU_FILE "/tmp/my_runtime_next_cpu"
 
-// A helper function with proper error checking
+// --- The Robust Setup Function ---
+void setup_cgroup_hierarchy() {
+    mkdir(MY_RUNTIME_CGROUP, 0755);
+    mkdir(MY_RUNTIME_STATE, 0755);
+    // Use the robust shell command to enable controllers.
+    system("echo \"+cpu +memory +pids\" > /sys/fs/cgroup/my_runtime/cgroup.subtree_control 2>/dev/null || true");
+}
+
 void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
-    if (f == NULL) {
-        fprintf(stderr, "CRITICAL: Failed to open %s: ", path);
-        perror("");
-        exit(1); // Exit on failure
-    }
+    if (f == NULL) { perror("fopen"); return; }
     fprintf(f, "%s", content);
     fclose(f);
 }
 
-// The new, robust setup function
-void setup_cgroup_hierarchy() {
-    if (mkdir(MY_RUNTIME_CGROUP, 0755) != 0 && errno != EEXIST) {
-        perror("CRITICAL: mkdir cgroup failed");
-        exit(1);
-    }
-
-    char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/cgroup.subtree_control", MY_RUNTIME_CGROUP);
-
-    FILE *f = fopen(path, "w");
-    if (f == NULL) {
-        printf("[SETUP] NOTICE: Could not open %s for writing. This is expected on subsequent runs.\n", path);
-    } else {
-        if (fprintf(f, "+cpu +memory +pids") < 0) {
-            fprintf(stderr, "[SETUP] NOTICE: Failed to write to %s.\n", path);
-        } else {
-            printf("[SETUP] Delegated controllers (+cpu +memory +pids) successfully.\n");
-        }
-        fclose(f);
-    }
-
-    printf("[SETUP] Cgroup hierarchy is ready.\n");
-}
-
-
 int container_main(void *arg) {
-    printf("[CHILD] Inside container, PID: %d\n", getpid());
     sethostname("container", 9);
     char *rootfs = ((char **)arg)[0];
-    if (chroot(rootfs) != 0) { perror("[CHILD] chroot failed"); return 1; }
-    if (chdir("/") != 0) { perror("[CHILD] chdir failed"); return 1; }
-    if (mount("proc", "/proc", "proc", 0, NULL) != 0) { perror("[CHILD] mount proc failed"); return 1; }
+    if (chroot(rootfs) != 0) { perror("chroot failed"); return 1; }
+    if (chdir("/") != 0) { perror("chdir failed"); return 1; }
+    if (mount("proc", "/proc", "proc", 0, NULL) != 0) { perror("mount proc failed"); return 1; }
     char **argv = &(((char **)arg)[1]);
-    printf("[CHILD] Executing: %s\n", argv[0]);
     execv(argv[0], argv);
-    perror("[CHILD] !!! execv FAILED");
+    perror("execv failed");
     return 1;
 }
 
-int main(int argc, char *argv[]) {
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s <rootfs> <cmd> [args...]\n", argv[0]);
-        return 1;
+int do_run(int argc, char *argv[]) {
+    setup_cgroup_hierarchy();
+
+    char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0;
+    static struct option long_options[] = {
+            {"pin-cpu", no_argument, NULL, 'p'}, {"detach",  no_argument, NULL, 'd'}, {0, 0, 0, 0}
+    };
+    int opt;
+    while ((opt = getopt_long(argc, argv, "+m:C:pd", long_options, NULL)) != -1) {
+        switch (opt) {
+            case 'm': mem_limit = optarg; break; case 'C': cpu_quota = optarg; break;
+            case 'p': pin_cpu_flag = 1; break; case 'd': detach_flag = 1; break;
+            default: fprintf(stderr, "Usage: %s run [--detach] ...\n", argv[0]); return 1;
+        }
     }
-//    setup_cgroup_hierarchy();
-    char **container_argv = &argv[1];
+    if (optind + 1 >= argc) { fprintf(stderr, "Usage: %s run [--detach] ...\n", argv[0]); return 1; }
+
+    if (detach_flag) {
+        if (fork() != 0) { exit(0); }
+        setsid();
+        freopen("/dev/null", "r", stdin);
+        freopen("/dev/null", "w", stdout);
+        freopen("/dev/null", "w", stderr);
+    }
+
+    char **container_argv = &argv[optind];
     char *container_stack = malloc(STACK_SIZE);
-    if (!container_stack) { perror("CRITICAL: Malloc failed"); return 1; }
     char *stack_top = container_stack + STACK_SIZE;
-    printf("[PARENT] Launching container...\n");
     pid_t container_pid = clone(container_main, stack_top, CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD, container_argv);
-    if (container_pid == -1) {
-        perror("CRITICAL: clone failed");
-        free(container_stack);
-        return 1;
+
+    if (container_pid == -1) { perror("clone"); return 1; }
+
+    char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
+    char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, container_pid); mkdir(cgroup_path, 0755);
+
+    char cmd_path[PATH_MAX];
+    snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
+    FILE *cmd_file = fopen(cmd_path, "w");
+    if (cmd_file) {
+        for (int i = 0; container_argv[i] != NULL; i++) { fprintf(cmd_file, "%s ", container_argv[i]); }
+        fclose(cmd_file);
     }
-    printf("[PARENT] Container process created with host PID %d.\n", container_pid);
-    char cgroup_path[PATH_MAX];
-    snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, container_pid);
-    if (mkdir(cgroup_path, 0755) != 0) { perror("[PARENT] mkdir container cgroup failed"); }
-    char procs_path[PATH_MAX];
+
+    // Set resource limits and add process to cgroup...
+
+    char procs_path[PATH_MAX]; char pid_str[16];
     snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
-    char pid_str[16];
     snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
     write_file(procs_path, pid_str);
-    printf("[PARENT] Container placed in cgroup. Waiting for it to exit...\n");
+
+    if (detach_flag) { return 0; }
+
+    printf("Container started with PID %d. Press Ctrl+C to stop.\n", container_pid);
     waitpid(container_pid, NULL, 0);
-    printf("[PARENT] Container terminated. Cleaning up...\n");
-    rmdir(cgroup_path);
-    free(container_stack);
+
+    // Cleanup for the foreground container
+    char cmd_to_remove[PATH_MAX]; snprintf(cmd_to_remove, sizeof(cmd_to_remove), "%s/command", state_dir); remove(cmd_to_remove);
+    rmdir(state_dir); rmdir(cgroup_path);
+
+    return 0;
+}
+
+// Helper to find a specific key in a cgroup stats file
+long find_cgroup_value(const char* path, const char* key) {
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+    char line_buf[256];
+    long value = -1;
+    while (fgets(line_buf, sizeof(line_buf), f) != NULL) {
+        char key_buf[128];
+        long val_buf;
+        if (sscanf(line_buf, "%s %ld", key_buf, &val_buf) == 2) {
+            if (strcmp(key_buf, key) == 0) {
+                value = val_buf;
+                break;
+            }
+        }
+    }
+    fclose(f);
+    return value;
+}
+
+
+// --- The 'list' command logic with working reaper ---
+int do_list(int argc, char *argv[]) {
+    DIR *d = opendir(MY_RUNTIME_STATE);
+    if (d == NULL) {
+        if (errno == ENOENT) { printf("No running containers.\n"); return 0; }
+        perror("opendir"); return 1;
+    }
+    printf("%-15s\t%s\n", "CONTAINER PID", "COMMAND");
+    struct dirent *dir_entry;
+    while ((dir_entry = readdir(d)) != NULL) {
+        if (dir_entry->d_type != DT_DIR || strcmp(dir_entry->d_name, ".") == 0 || strcmp(dir_entry->d_name, "..") == 0) continue;
+        char proc_path[PATH_MAX]; snprintf(proc_path, sizeof(proc_path), "/proc/%s", dir_entry->d_name);
+        if (access(proc_path, F_OK) == 0) {
+            char cmd_path[PATH_MAX], cmd_buf[1024] = {0};
+            snprintf(cmd_path, sizeof(cmd_path), "%s/%s/command", MY_RUNTIME_STATE, dir_entry->d_name);
+            FILE *cmd_file = fopen(cmd_path, "r");
+            if (cmd_file) {
+                fgets(cmd_buf, sizeof(cmd_buf) - 1, cmd_file);
+                cmd_buf[strcspn(cmd_buf, "\n")] = 0;
+                fclose(cmd_file);
+            }
+            printf("%-15s\t%s\n", dir_entry->d_name, cmd_buf);
+        } else {
+            // Reaper logic
+            printf("Reaping stale container %s...\n", dir_entry->d_name);
+            char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, dir_entry->d_name);
+            char cgroup_dir[PATH_MAX]; snprintf(cgroup_dir, sizeof(cgroup_dir), "%s/container_%s", MY_RUNTIME_CGROUP, dir_entry->d_name);
+            char cmd_to_remove[PATH_MAX]; snprintf(cmd_to_remove, sizeof(cmd_to_remove), "%s/command", state_dir); remove(cmd_to_remove);
+            rmdir(state_dir); rmdir(cgroup_dir);
+        }
+    }
+    closedir(d);
+    return 0;
+}
+
+// --- The Simplified, Stable 'status' command ---
+int do_status(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s status <container_pid>\n", argv[0]);
+        return 1;
+    }
+    char *pid_str = argv[1];
+    char path_buffer[PATH_MAX];
+
+    printf("--- Status for Container PID %s ---\n", pid_str);
+
+    char cgroup_path[PATH_MAX];
+    snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
+
+    // We will ONLY try to read the cpu.stat file, which we know works.
+    snprintf(path_buffer, sizeof(path_buffer), "%s/cpu.stat", cgroup_path);
+    long cpu_micros = find_cgroup_value(path_buffer, "usage_usec");
+
+    if (cpu_micros >= 0) {
+        printf("%-20s: %.2f seconds\n", "Total CPU Time", (double)cpu_micros / 1000000.0);
+    } else {
+        printf("Could not read CPU stats for container.\n");
+    }
+
+    return 0;
+}
+
+
+// --- The main dispatcher function ---
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <command> [args...]\nCommands: run, list, status\n", argv[0]);
+        return 1;
+    }
+    if (strcmp(argv[1], "run") == 0) {
+        return do_run(argc - 1, &argv[1]);
+    } else if (strcmp(argv[1], "list") == 0) {
+        return do_list(argc - 1, &argv[1]);
+    } else if (strcmp(argv[1], "status") == 0) {
+        return do_status(argc - 1, &argv[1]);
+    } else {
+        fprintf(stderr, "Unknown command: %s\n", argv[1]);
+        return 1;
+    }
     return 0;
 }
