@@ -95,43 +95,58 @@ int do_run(int argc, char *argv[]) {
     return WIFEXITED(child_status) ? WEXITSTATUS(child_status) : -1;
 }
 
+// The corrected do_list function
 int do_list(int argc, char *argv[]) {
     DIR *d = opendir(MY_RUNTIME_STATE);
     if (d == NULL) {
-        if (errno == ENOENT) { printf("No running containers.\n"); return 0; }
-        perror("opendir runtime state"); return 1;
+        if (errno == ENOENT) {
+            printf("No running containers.\n");
+            return 0;
+        }
+        perror("opendir runtime state");
+        return 1;
     }
 
     printf("%-15s\t%s\n", "CONTAINER PID", "COMMAND");
-    
+
     struct dirent *dir_entry;
     while ((dir_entry = readdir(d)) != NULL) {
         if (dir_entry->d_type != DT_DIR || strcmp(dir_entry->d_name, ".") == 0 || strcmp(dir_entry->d_name, "..") == 0) {
             continue;
         }
-        
+
         char proc_path[PATH_MAX];
         snprintf(proc_path, sizeof(proc_path), "/proc/%s", dir_entry->d_name);
         if (access(proc_path, F_OK) == 0) {
+            // Process is still alive, print it
             char cmd_path[PATH_MAX], cmd_buf[1024] = {0};
             snprintf(cmd_path, sizeof(cmd_path), "%s/%s/command", MY_RUNTIME_STATE, dir_entry->d_name);
             FILE *cmd_file = fopen(cmd_path, "r");
             if (cmd_file) {
                 fgets(cmd_buf, sizeof(cmd_buf) - 1, cmd_file);
+                // This removes the trailing newline from the command we read
+                cmd_buf[strcspn(cmd_buf, "\n")] = 0;
                 fclose(cmd_file);
             }
-            printf("%-15s\t%s", dir_entry->d_name, cmd_buf);
+            // THE FIX IS HERE: Added \n to the end of the format string
+            printf("%-15s\t%s\n", dir_entry->d_name, cmd_buf);
         } else {
-            // --- FIX: Use system("rm -rf") for recursive delete ---
+            // "Reaper" logic for stale containers
             printf("Reaping stale container %s...\n", dir_entry->d_name);
             char state_dir[PATH_MAX];
             snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, dir_entry->d_name);
             char cgroup_dir[PATH_MAX];
             snprintf(cgroup_dir, sizeof(cgroup_dir), "%s/container_%s", MY_RUNTIME_CGROUP, dir_entry->d_name);
-            
-            char command[PATH_MAX * 2];
-            sprintf(command, "rm -rf %s %s", state_dir, cgroup_dir);
-            system(command);
+
+            // Unmount just in case, then remove recursively
+            char umount_command[PATH_MAX + 64];
+            snprintf(umount_command, sizeof(umount_command), "umount -f -l %s/proc 2>/dev/null || true", state_dir);
+            system(umount_command);
+
+            // Now, recursively remove the directories
+            char rm_command[PATH_MAX * 2];
+            sprintf(rm_command, "rm -rf %s %s", state_dir, cgroup_dir);
+            system(rm_command);
         }
     }
     closedir(d);
