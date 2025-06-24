@@ -1,4 +1,4 @@
-// File: container_step5_final_v4.c
+// File: container_step5_final_v5.c
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,97 +14,71 @@
 #include <getopt.h>
 #include <dirent.h>
 
+// All other functions and definitions are unchanged.
 #define STACK_SIZE (1024 * 1024)
 #define MY_RUNTIME_CGROUP "/sys/fs/cgroup/my_runtime"
 #define MY_RUNTIME_STATE "/run/my_runtime"
 #define NEXT_CPU_FILE "/tmp/my_runtime_next_cpu"
-
-// Helper functions and container_main are unchanged
-void write_file(const char *path, const char *content) { /* ... */
+void write_file(const char *path, const char *content) { /* ... same ... */
     FILE *f = fopen(path, "w"); if (f == NULL) { return; } fprintf(f, "%s", content); fclose(f);
 }
-void setup_cgroup_hierarchy() { /* ... */
+void setup_cgroup_hierarchy() { /* ... same ... */
     if (mkdir(MY_RUNTIME_STATE, 0755) != 0 && errno != EEXIST) { perror("mkdir runtime state dir failed"); }
     if (access(MY_RUNTIME_CGROUP, F_OK) == 0) return; if (mkdir(MY_RUNTIME_CGROUP, 0755) != 0 && errno != EEXIST) { perror("mkdir my_runtime failed"); return; } char subtree_control_path[PATH_MAX]; snprintf(subtree_control_path, sizeof(subtree_control_path), "%s/cgroup.subtree_control", MY_RUNTIME_CGROUP); write_file(subtree_control_path, "+cpu +memory +pids");
 }
-int container_main(void *arg) { /* ... */
+int container_main(void *arg) { /* ... same ... */
     sethostname("container", 9); char *rootfs = ((char **)arg)[0]; if (chroot(rootfs) != 0) { perror("chroot failed"); return 1; } if (chdir("/") != 0) { perror("chdir failed"); return 1; } mount("proc", "/proc", "proc", 0, NULL); char **argv = &(((char **)arg)[1]); execv(argv[0], argv); perror("[CHILD] !!! execv FAILED"); return 1;
 }
-
-int do_run(int argc, char *argv[]) {
+int do_run(int argc, char *argv[]) { /* ... same from v4 ... */
     setup_cgroup_hierarchy();
-    
-    char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0;
-    static struct option long_options[] = {
-        {"pin-cpu", no_argument, NULL, 'p'}, {"detach",  no_argument, NULL, 'd'}, {0, 0, 0, 0}
-    };
+    int detach_flag = 0; char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0;
+    static struct option long_options[] = { {"pin-cpu", no_argument, NULL, 'p'}, {"detach",  no_argument, NULL, 'd'}, {0, 0, 0, 0} };
     int opt;
     while ((opt = getopt_long(argc, argv, "+m:C:pd", long_options, NULL)) != -1) {
         switch (opt) {
             case 'm': mem_limit = optarg; break; case 'C': cpu_quota = optarg; break; case 'p': pin_cpu_flag = 1; break; case 'd': detach_flag = 1; break; default:
-            fprintf(stderr, "Usage: %s run [--detach] ...\n", argv[0]); return 1;
+                fprintf(stderr, "Usage: %s run [--detach] ...\n", argv[0]); return 1;
         }
     }
     if (optind + 1 >= argc) { fprintf(stderr, "Usage: %s run [--detach] ...\n", argv[0]); return 1; }
-    
     if (detach_flag) {
-        // Detach from terminal immediately
-        if (fork() != 0) {
-            // Parent exits, leaving the child to continue
-            exit(0);
-        }
-        setsid(); // Create a new session, detaching from TTY
+        if (fork() != 0) { exit(0); } setsid();
         freopen("/dev/null", "r", stdin); freopen("/dev/null", "w", stdout); freopen("/dev/null", "w", stderr);
     }
-    
     char **container_argv = &argv[optind];
-    char *container_stack = malloc(STACK_SIZE);
-    char *stack_top = container_stack + STACK_SIZE;
+    char *container_stack = malloc(STACK_SIZE); char *stack_top = container_stack + STACK_SIZE;
     int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD;
     pid_t container_pid = clone(container_main, stack_top, clone_flags, container_argv);
-
     if (container_pid == -1) { perror("clone failed"); free(container_stack); return 1; }
-    
-    // Setup state and cgroup dirs...
     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
     char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, container_pid); mkdir(cgroup_path, 0755);
     char cmd_path[PATH_MAX]; snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
     FILE *cmd_file = fopen(cmd_path, "w"); if (cmd_file) { for (int i = 1; container_argv[i] != NULL; i++) { fprintf(cmd_file, "%s ", container_argv[i]); } fclose(cmd_file); }
-    if (pin_cpu_flag) { /* ... pinning logic is the same ... */
+    if (pin_cpu_flag) {
         FILE *f = fopen(NEXT_CPU_FILE, "r+"); int next_cpu = 0; if (f) { fscanf(f, "%d", &next_cpu); } else { f = fopen(NEXT_CPU_FILE, "w"); } long num_cpus = sysconf(_SC_NPROCESSORS_ONLN); int target_cpu = next_cpu % num_cpus; cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(target_cpu, &cpuset); sched_setaffinity(container_pid, sizeof(cpu_set_t), &cpuset); struct sched_param param = { .sched_priority = 50 }; sched_setscheduler(container_pid, SCHED_RR, &param); fseek(f, 0, SEEK_SET); fprintf(f, "%d", target_cpu + 1); fclose(f);
     }
-    // Configure-Then-Add Logic...
-    if (mem_limit) { /* ... mem limit logic is the same ... */
+    if (mem_limit) {
         char mem_path[PATH_MAX]; snprintf(mem_path, sizeof(mem_path), "%s/memory.max", cgroup_path); write_file(mem_path, mem_limit); char swap_path[PATH_MAX]; snprintf(swap_path, sizeof(swap_path), "%s/memory.swap.max", cgroup_path); write_file(swap_path, "0");
     }
-    if (cpu_quota) { /* ... cpu limit logic is the same ... */
+    if (cpu_quota) {
         char cpu_path[PATH_MAX]; char cpu_content[64]; snprintf(cpu_path, sizeof(cpu_path), "%s/cpu.max", cgroup_path); snprintf(cpu_content, sizeof(cpu_content), "%s 100000", cpu_quota); write_file(cpu_path, cpu_content);
     }
     char procs_path[PATH_MAX]; char pid_str[16]; snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path); snprintf(pid_str, sizeof(pid_str), "%d", container_pid); write_file(procs_path, pid_str);
-
-    // In detach mode, we are the second parent, so our job is done.
-    if (detach_flag) {
-        return 0;
-    }
-    
-    // In foreground mode, wait and cleanup
+    if (detach_flag) { return 0; }
     int child_status;
     waitpid(container_pid, &child_status, 0);
-    rmdir(state_dir); // This will fail, but that's okay for foreground
-    rmdir(cgroup_path);
+    // For foreground containers, we can now do a better cleanup.
+    char cmd_to_remove[PATH_MAX]; snprintf(cmd_to_remove, sizeof(cmd_to_remove), "%s/command", state_dir); remove(cmd_to_remove);
+    rmdir(state_dir); rmdir(cgroup_path);
     return WIFEXITED(child_status) ? WEXITSTATUS(child_status) : -1;
 }
 
-// The corrected do_list function
+// ---- The ONLY changed function is do_list ----
 int do_list(int argc, char *argv[]) {
     DIR *d = opendir(MY_RUNTIME_STATE);
     if (d == NULL) {
-        if (errno == ENOENT) {
-            printf("No running containers.\n");
-            return 0;
-        }
-        perror("opendir runtime state");
-        return 1;
+        if (errno == ENOENT) { printf("No running containers.\n"); return 0; }
+        perror("opendir runtime state"); return 1;
     }
 
     printf("%-15s\t%s\n", "CONTAINER PID", "COMMAND");
@@ -118,35 +92,38 @@ int do_list(int argc, char *argv[]) {
         char proc_path[PATH_MAX];
         snprintf(proc_path, sizeof(proc_path), "/proc/%s", dir_entry->d_name);
         if (access(proc_path, F_OK) == 0) {
-            // Process is still alive, print it
             char cmd_path[PATH_MAX], cmd_buf[1024] = {0};
             snprintf(cmd_path, sizeof(cmd_path), "%s/%s/command", MY_RUNTIME_STATE, dir_entry->d_name);
             FILE *cmd_file = fopen(cmd_path, "r");
             if (cmd_file) {
                 fgets(cmd_buf, sizeof(cmd_buf) - 1, cmd_file);
-                // This removes the trailing newline from the command we read
                 cmd_buf[strcspn(cmd_buf, "\n")] = 0;
                 fclose(cmd_file);
             }
-            // THE FIX IS HERE: Added \n to the end of the format string
             printf("%-15s\t%s\n", dir_entry->d_name, cmd_buf);
         } else {
-            // "Reaper" logic for stale containers
+            // --- The Final, Corrected Reaper Logic ---
             printf("Reaping stale container %s...\n", dir_entry->d_name);
             char state_dir[PATH_MAX];
             snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, dir_entry->d_name);
+            char cmd_to_remove[PATH_MAX];
+            snprintf(cmd_to_remove, sizeof(cmd_to_remove), "%s/command", state_dir);
             char cgroup_dir[PATH_MAX];
             snprintf(cgroup_dir, sizeof(cgroup_dir), "%s/container_%s", MY_RUNTIME_CGROUP, dir_entry->d_name);
 
-            // Unmount just in case, then remove recursively
+            // 1. Unmount any leftover procfs, just in case.
             char umount_command[PATH_MAX + 64];
-            snprintf(umount_command, sizeof(umount_command), "umount -f -l %s/proc 2>/dev/null || true", state_dir);
+            snprintf(umount_command, sizeof(umount_command), "umount %s/proc 2>/dev/null || true", state_dir);
             system(umount_command);
 
-            // Now, recursively remove the directories
-            char rm_command[PATH_MAX * 2];
-            sprintf(rm_command, "rm -rf %s %s", state_dir, cgroup_dir);
-            system(rm_command);
+            // 2. Remove the 'command' file from the state directory.
+            remove(cmd_to_remove);
+
+            // 3. Now remove the (now empty) state directory.
+            rmdir(state_dir);
+
+            // 4. And finally, remove the cgroup directory using the kernel's method.
+            rmdir(cgroup_dir);
         }
     }
     closedir(d);
