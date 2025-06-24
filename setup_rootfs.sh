@@ -36,6 +36,7 @@ COMMANDS=(
     "/bin/cat"
     "/bin/echo"
     "/bin/ps"
+    "/bin/sleep"
     "/bin/touch"
     "/bin/rm"
     "/bin/mkdir"

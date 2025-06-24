@@ -134,14 +134,65 @@ int do_list(int argc, char *argv[]) {
 void print_file_content(const char *label, const char *path) { /* ... */
     char buf[1024] = {0}; FILE *f = fopen(path, "r"); if (!f) return; fread(buf, 1, sizeof(buf) - 1, f); printf("%-20s: %s", label, buf); fclose(f);
 }
-int do_status(int argc, char *argv[]) { /* ... */
-    if (argc < 2) { fprintf(stderr, "Usage: %s status <container_pid>\n", argv[0]); return 1; }
-    char *pid_str = argv[1]; printf("--- Status for Container PID %s ---\n", pid_str);
-    char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
-    if (access(state_dir, F_OK) != 0) { fprintf(stderr, "Error: No container with PID %s found.\n", pid_str); return 1; }
-    char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
-    char path_buffer[PATH_MAX]; snprintf(path_buffer, sizeof(path_buffer), "%s/memory.current", cgroup_path); print_file_content("Memory Usage (bytes)", path_buffer);
-    snprintf(path_buffer, sizeof(path_buffer), "%s/cpu.stat", cgroup_path); print_file_content("CPU Stats", path_buffer); return 0;
+// New helper function to find a value in a key-value file
+long find_cgroup_value(const char* path, const char* key) {
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+
+    char line_buf[256];
+    long value = -1;
+
+    while (fgets(line_buf, sizeof(line_buf), f) != NULL) {
+        char key_buf[128];
+        long val_buf;
+        // sscanf tries to parse the line into a key and a value
+        if (sscanf(line_buf, "%s %ld", key_buf, &val_buf) == 2) {
+            if (strcmp(key_buf, key) == 0) {
+                value = val_buf;
+                break;
+            }
+        }
+    }
+
+    fclose(f);
+    return value;
+}
+
+
+// The new, improved do_status function
+int do_status(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s status <container_pid>\n", argv[0]);
+        return 1;
+    }
+
+    char *pid_str = argv[1];
+    printf("--- Status for Container PID %s ---\n", pid_str);
+
+    char state_dir[PATH_MAX];
+    snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
+    if (access(state_dir, F_OK) != 0) {
+        fprintf(stderr, "Error: No container with PID %s found.\n", pid_str);
+        return 1;
+    }
+
+    char cgroup_path[PATH_MAX];
+    snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
+
+    char path_buffer[PATH_MAX];
+
+    // Print Memory Usage
+    snprintf(path_buffer, sizeof(path_buffer), "%s/memory.current", cgroup_path);
+    print_file_content("Memory Usage (bytes)", path_buffer);
+
+    // Print human-readable CPU usage
+    snprintf(path_buffer, sizeof(path_buffer), "%s/cpu.stat", cgroup_path);
+    long cpu_micros = find_cgroup_value(path_buffer, "usage_usec");
+    if (cpu_micros >= 0) {
+        printf("%-20s: %.2f seconds\n", "Total CPU Time", (double)cpu_micros / 1000000.0);
+    }
+
+    return 0;
 }
 int main(int argc, char *argv[]) { /* ... */
     if (argc < 2) { fprintf(stderr, "Usage: %s <command> [args...]\nCommands: run, list, status\n", argv[0]); return 1; }
