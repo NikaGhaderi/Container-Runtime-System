@@ -112,7 +112,6 @@ int do_run(int argc, char *argv[]) {
     char **container_argv = &argv[optind];
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
-    int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWPID;
     pid_t container_pid = clone(container_main, stack_top, CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD, container_argv);
 
     if (container_pid == -1) { perror("clone"); return 1; }
@@ -253,3 +252,4 @@ int main(int argc, char *argv[]) {
     }
     return 0;
 }
+
