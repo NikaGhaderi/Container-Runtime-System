@@ -19,6 +19,44 @@
 #define MY_RUNTIME_STATE "/run/my_runtime"
 #define NEXT_CPU_FILE "/tmp/my_runtime_next_cpu"
 
+
+int do_freeze(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s freeze <container_pid>\n", argv[0]);
+        return 1;
+    }
+    char *pid_str = argv[1];
+    char freeze_path[PATH_MAX];
+    snprintf(freeze_path, sizeof(freeze_path), "%s/container_%s/cgroup.freeze", MY_RUNTIME_CGROUP, pid_str);
+
+    printf("Freezing container %s...\n", pid_str);
+    write_file(freeze_path, "1");
+    printf("Done.\n");
+
+    return 0;
+}
+
+int do_thaw(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s thaw <container_pid>\n", argv[0]);
+        return 1;
+    }
+    char *pid_str = argv[1];
+    char freeze_path[PATH_MAX];
+    snprintf(freeze_path, sizeof(freeze_path), "%s/container_%s/cgroup.freeze", MY_RUNTIME_CGROUP, pid_str);
+
+    printf("Thawing container %s...\n", pid_str);
+    write_file(freeze_path, "0");
+    printf("Done.\n");
+
+    return 0;
+}
+
+
+
+
+
+
 // --- The Robust Setup Function ---
 void setup_cgroup_hierarchy() {
     mkdir(MY_RUNTIME_CGROUP, 0755);
@@ -74,6 +112,7 @@ int do_run(int argc, char *argv[]) {
     char **container_argv = &argv[optind];
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
+    int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWPID;
     pid_t container_pid = clone(container_main, stack_top, CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD, container_argv);
 
     if (container_pid == -1) { perror("clone"); return 1; }
@@ -195,7 +234,7 @@ int do_status(int argc, char *argv[]) {
 // --- The main dispatcher function ---
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <command> [args...]\nCommands: run, list, status\n", argv[0]);
+        fprintf(stderr, "Usage: %s <command> [args...]\nCommands: run, list, status, freeze, thaw\n", argv[0]);
         return 1;
     }
     if (strcmp(argv[1], "run") == 0) {
@@ -204,6 +243,10 @@ int main(int argc, char *argv[]) {
         return do_list(argc - 1, &argv[1]);
     } else if (strcmp(argv[1], "status") == 0) {
         return do_status(argc - 1, &argv[1]);
+    } else if (strcmp(argv[1], "freeze") == 0) {
+        return do_freeze(argc - 1, &argv[1]);
+    } else if (strcmp(argv[1], "thaw") == 0) {
+        return do_thaw(argc - 1, &argv[1]);
     } else {
         fprintf(stderr, "Unknown command: %s\n", argv[1]);
         return 1;
