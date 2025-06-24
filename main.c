@@ -130,22 +130,40 @@ int do_list(int argc, char *argv[]) {
     return 0;
 }
 
-// status and main functions are unchanged
-void print_file_content(const char *label, const char *path) { /* ... */
-    char buf[1024] = {0}; FILE *f = fopen(path, "r"); if (!f) return; fread(buf, 1, sizeof(buf) - 1, f); printf("%-20s: %s", label, buf); fclose(f);
+// Add this new helper function near the top with the others.
+// It formats large byte counts into KB, MB, GB for readability.
+void format_bytes(long bytes, char *buf, size_t size) {
+    const char* suffixes[] = {"B", "KB", "MB", "GB", "TB"};
+    int i = 0;
+    double d_bytes = bytes;
+
+    while (d_bytes >= 1024 && i < 4) {
+        d_bytes /= 1024;
+        i++;
+    }
+    snprintf(buf, size, "%.2f %s", d_bytes, suffixes[i]);
 }
-// New helper function to find a value in a key-value file
+
+// You can also replace your old print_file_content and find_cgroup_value
+// with these slightly more robust versions.
+void print_file_content(const char *label, const char *path) {
+    char buf[1024] = {0};
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    fread(buf, 1, sizeof(buf) - 1, f);
+    buf[strcspn(buf, "\n")] = 0; // Remove trailing newline
+    printf("%-25s: %s\n", label, buf);
+    fclose(f);
+}
+
 long find_cgroup_value(const char* path, const char* key) {
     FILE* f = fopen(path, "r");
     if (!f) return -1;
-
     char line_buf[256];
     long value = -1;
-
     while (fgets(line_buf, sizeof(line_buf), f) != NULL) {
         char key_buf[128];
         long val_buf;
-        // sscanf tries to parse the line into a key and a value
         if (sscanf(line_buf, "%s %ld", key_buf, &val_buf) == 2) {
             if (strcmp(key_buf, key) == 0) {
                 value = val_buf;
@@ -153,13 +171,12 @@ long find_cgroup_value(const char* path, const char* key) {
             }
         }
     }
-
     fclose(f);
     return value;
 }
 
 
-// The new, improved do_status function
+// --- Replace your old do_status function with this new one ---
 int do_status(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s status <container_pid>\n", argv[0]);
@@ -167,8 +184,10 @@ int do_status(int argc, char *argv[]) {
     }
 
     char *pid_str = argv[1];
-    printf("--- Status for Container PID %s ---\n", pid_str);
+    char path_buffer[PATH_MAX];
+    char format_buffer[64];
 
+    // Check if container exists
     char state_dir[PATH_MAX];
     snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
     if (access(state_dir, F_OK) != 0) {
@@ -176,24 +195,73 @@ int do_status(int argc, char *argv[]) {
         return 1;
     }
 
+    printf("--- Status for Container PID %s ---\n", pid_str);
+
+    // Print Command
+    snprintf(path_buffer, sizeof(path_buffer), "%s/command", state_dir);
+    print_file_content("Command", path_buffer);
+
     char cgroup_path[PATH_MAX];
     snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
 
-    char path_buffer[PATH_MAX];
+    printf("\n--- Resources ---\n");
+    // --- Memory Stats ---
+    long mem_current = -1;
+    long mem_limit = -1;
 
-    // Print Memory Usage
     snprintf(path_buffer, sizeof(path_buffer), "%s/memory.current", cgroup_path);
-    print_file_content("Memory Usage (bytes)", path_buffer);
+    mem_current = find_cgroup_value(path_buffer, "usage"); // memory.current is not key-value, let's read it directly
+    FILE* mem_f = fopen(path_buffer, "r");
+    if (mem_f) {
+        fscanf(mem_f, "%ld", &mem_current);
+        fclose(mem_f);
+    }
 
-    // Print human-readable CPU usage
+    snprintf(path_buffer, sizeof(path_buffer), "%s/memory.max", cgroup_path);
+    mem_f = fopen(path_buffer, "r");
+    if (mem_f) {
+        // Check if limit is "max"
+        char buf[32];
+        fgets(buf, sizeof(buf), mem_f);
+        if (strncmp(buf, "max", 3) != 0) {
+            sscanf(buf, "%ld", &mem_limit);
+        }
+        fclose(mem_f);
+    }
+
+    format_bytes(mem_current, format_buffer, sizeof(format_buffer));
+    printf("%-25s: %s\n", "Memory Usage", format_buffer);
+    if (mem_limit != -1) {
+        format_bytes(mem_limit, format_buffer, sizeof(format_buffer));
+        printf("%-25s: %s\n", "Memory Limit", format_buffer);
+    } else {
+        printf("%-25s: %s\n", "Memory Limit", "None");
+    }
+
+    // --- CPU Stats ---
     snprintf(path_buffer, sizeof(path_buffer), "%s/cpu.stat", cgroup_path);
     long cpu_micros = find_cgroup_value(path_buffer, "usage_usec");
     if (cpu_micros >= 0) {
-        printf("%-20s: %.2f seconds\n", "Total CPU Time", (double)cpu_micros / 1000000.0);
+        printf("%-25s: %.2f seconds\n", "Total CPU Time", (double)cpu_micros / 1000000.0);
     }
+
+    // --- PID Stats ---
+    long pids_current = -1;
+    snprintf(path_buffer, sizeof(path_buffer), "%s/pids.current", cgroup_path);
+    FILE* pids_f = fopen(path_buffer, "r");
+    if (pids_f) {
+        fscanf(pids_f, "%ld", &pids_current);
+        fclose(pids_f);
+    }
+    printf("%-25s: %ld\n", "Active Processes/Threads", pids_current);
+
+
+    printf("\n----------------------------------\n");
 
     return 0;
 }
+
+
 int main(int argc, char *argv[]) { /* ... */
     if (argc < 2) { fprintf(stderr, "Usage: %s <command> [args...]\nCommands: run, list, status\n", argv[0]); return 1; }
     if (strcmp(argv[1], "run") == 0) { return do_run(argc - 1, &argv[1]);
