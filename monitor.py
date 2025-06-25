@@ -4,7 +4,7 @@ import ctypes as ct
 import time
 
 bpf_text = """
-#include <linux/sched.h>
+#include <linux/sched.h> // <-- Needed for the CLONE_NEW* flags
 #include <uapi/linux/bpf.h>
 #include <asm/unistd_64.h>
 
@@ -18,34 +18,50 @@ BPF_PERF_OUTPUT(events);
 
 #define COPY_SYSCALL_NAME(name) __builtin_memcpy(&data.syscall_name, name, sizeof(name))
 
+// Define a bitmask of all the namespace flags we care about
+#define ALL_NS_FLAGS (CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET)
+
 TRACEPOINT_PROBE(raw_syscalls, sys_enter) {
     u64 syscall_id = args->id;
     struct data_t data = {};
 
     if (syscall_id == __NR_clone) {
-        char name[] = "clone";
-        COPY_SYSCALL_NAME(name);
+        // --- NEW: Read the clone_flags from the first argument ---
+        unsigned long clone_flags = (unsigned long)args->args[0];
+
+        // --- NEW: Check if any of the namespace flags are set ---
+        if (clone_flags & ALL_NS_FLAGS) {
+            char name[] = "clone (new ns)";
+            COPY_SYSCALL_NAME(name);
+        } else {
+            return 0; // Not a namespace clone, ignore it
+        }
+
     } else if (syscall_id == __NR_unshare) {
-        char name[] = "unshare";
-        COPY_SYSCALL_NAME(name);
+        // We can apply the same logic to unshare
+        unsigned long unshare_flags = (unsigned long)args->args[0];
+        if (unshare_flags & ALL_NS_FLAGS) {
+            char name[] = "unshare";
+            COPY_SYSCALL_NAME(name);
+        } else {
+            return 0; // Not a namespace unshare, ignore it
+        }
+
     } else if (syscall_id == __NR_mkdir) {
         char path[128];
-        
-        // --- THE FINAL FIX IS HERE ---
-        // We use args->args[0] to get the first syscall argument, which is the path.
         bpf_probe_read_user_str(&path, sizeof(path), (const char *)args->args[0]);
 
         char cgroup_path[] = "/sys/fs/cgroup";
         for (int i = 0; i < sizeof(cgroup_path) - 1; ++i) {
             if (path[i] != cgroup_path[i]) {
-                return 0;
+                return 0; 
             }
         }
         char name[] = "mkdir (cgroup)";
         COPY_SYSCALL_NAME(name);
 
     } else {
-        return 0;
+        return 0; // Not a syscall we care about
     }
 
     data.pid = bpf_get_current_pid_tgid() >> 32;
@@ -55,7 +71,7 @@ TRACEPOINT_PROBE(raw_syscalls, sys_enter) {
 }
 """
 
-# --- The User-Space Python Program is unchanged ---
+# The Python part of the script is completely unchanged.
 class Data(ct.Structure):
     _fields_ = [
         ("pid", ct.c_uint), ("comm", ct.c_char * 16), ("syscall_name", ct.c_char * 32),
@@ -70,7 +86,6 @@ def print_event(cpu, data, size):
     with open("ebpf_log.txt", "a") as f:
         f.write(log_line)
 
-# --- Main program execution is unchanged ---
 print("Starting eBPF monitoring... Press Ctrl+C to exit.")
 try:
     b = BPF(text=bpf_text)
