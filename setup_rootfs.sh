@@ -1,12 +1,35 @@
 #!/bin/bash
 set -e
 
-# The name of our read-only base image directory
+# --- Part 1: Cgroup and Runtime State Setup ---
+# This part will now run every time to ensure the necessary
+# cgroup and state directories exist.
+
+echo "--> Ensuring runtime directories exist..."
+mkdir -p /sys/fs/cgroup/my_runtime
+mkdir -p /run/my_runtime
+
+# We can also add the robust cleanup logic here for any leftover container rootfs
+# that might be using the old name, just in case.
+LEGACY_ROOTFS="my-container-rootfs"
+if [ -d "$LEGACY_ROOTFS" ]; then
+    echo "--> Found old rootfs. Cleaning up old mounts..."
+    while mountpoint -q "${LEGACY_ROOTFS}/proc" 2>/dev/null; do
+        echo "--> Unmounting a /proc layer from old rootfs..."
+        umount -f -l "${LEGACY_ROOTFS}/proc" || true
+        sleep 0.1
+    done
+fi
+
+
+# --- Part 2: Base Image Creation ---
+# This part will still only run if the image is missing.
+
 IMAGE_DIR="ubuntu-base-image"
 
-# Only build the image if it doesn't already exist
 if [ -d "$IMAGE_DIR" ]; then
-    echo "--> Base image '${IMAGE_DIR}' already exists. Skipping setup."
+    echo "--> Base image '${IMAGE_DIR}' already exists. Skipping image creation."
+    echo "--> Setup complete."
     exit 0
 fi
 
@@ -21,14 +44,12 @@ COMMANDS=(
 # Create the basic directory structure for the image
 mkdir -p "${IMAGE_DIR}"/{bin,lib,lib64,usr/bin,proc,tmp}
 
-# Function to copy a binary and its dependencies into the image
 copy_binary_with_deps() {
     local binary_path="$1"
     if [ ! -f "$binary_path" ]; then
         echo "--> WARNING: Command not found on host: $binary_path"
         return
     fi
-    echo "--> Copying binary: $binary_path"
     local dest_binary="${IMAGE_DIR}${binary_path}"
     mkdir -p "$(dirname "$dest_binary")"
     cp "$binary_path" "$dest_binary"
@@ -42,7 +63,6 @@ copy_binary_with_deps() {
     done
 }
 
-# Loop through our list of commands and copy each one into the image
 for cmd in "${COMMANDS[@]}"; do
     copy_binary_with_deps "$cmd"
 done
