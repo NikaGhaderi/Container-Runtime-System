@@ -13,6 +13,7 @@
 #include <limits.h>
 #include <getopt.h>
 #include <dirent.h>
+#include <sys/syscall.h>
 
 #define STACK_SIZE (1024 * 1024)
 #define MY_RUNTIME_CGROUP "/sys/fs/cgroup/my_runtime"
@@ -72,17 +73,7 @@ void write_file(const char *path, const char *content) {
     fclose(f);
 }
 
-int container_main(void *arg) {
-    sethostname("container", 9);
-    char *rootfs = ((char **)arg)[0];
-    if (chroot(rootfs) != 0) { perror("chroot failed"); return 1; }
-    if (chdir("/") != 0) { perror("chdir failed"); return 1; }
-    if (mount("proc", "/proc", "proc", 0, NULL) != 0) { perror("mount proc failed"); return 1; }
-    char **argv = &(((char **)arg)[1]);
-    execv(argv[0], argv);
-    perror("execv failed");
-    return 1;
-}
+
 
 int do_run(int argc, char *argv[]) {
     setup_cgroup_hierarchy();

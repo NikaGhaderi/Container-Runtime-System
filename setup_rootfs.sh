@@ -76,7 +76,7 @@ copy_binary_with_deps() {
 
 
 # --- Main script execution ---
-mkdir -p "${ROOTFS_DIR}"/{bin,lib,lib64,usr/bin,proc}
+mkdir -p "${ROOTFS_DIR}"/{bin,lib,lib64,usr/bin,proc,tmp}
 
 for cmd in "${COMMANDS[@]}"; do
     copy_binary_with_deps "$cmd"
