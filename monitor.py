@@ -3,80 +3,65 @@ from bcc import BPF
 import ctypes as ct
 import time
 
+# This is our eBPF program written in C, using separate, stable tracepoints.
 bpf_text = """
 #include <linux/sched.h>
 #include <uapi/linux/bpf.h>
-#include <asm/unistd_64.h>
 
+// The data structure is the same
 struct data_t {
     u32 pid;
     char comm[TASK_COMM_LEN];
     char syscall_name[32];
 };
-
 BPF_PERF_OUTPUT(events);
 
+// Helper macro for copying the syscall name
 #define COPY_SYSCALL_NAME(name) __builtin_memcpy(&data.syscall_name, name, sizeof(name))
-#define ALL_NS_FLAGS (CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET)
 
-TRACEPOINT_PROBE(raw_syscalls, sys_enter) {
-    u64 syscall_id = args->id;
-    struct data_t data = {};
-
-    if (syscall_id == __NR_clone) {
-        unsigned long clone_flags = (unsigned long)args->args[0];
-        if (clone_flags & ALL_NS_FLAGS) {
-            char name[] = "clone (new ns)";
-            COPY_SYSCALL_NAME(name);
-        } else {
-            return 0;
-        }
-
-    } else if (syscall_id == __NR_unshare) {
-        unsigned long unshare_flags = (unsigned long)args->args[0];
-        if (unshare_flags & ALL_NS_FLAGS) {
-            char name[] = "unshare";
-            COPY_SYSCALL_NAME(name);
-        } else {
-            return 0;
-        }
-
-    // --- THE FIX IS HERE: We now check for both mkdir and mkdirat ---
-    } else if (syscall_id == __NR_mkdir || syscall_id == __NR_mkdirat) {
-        char path[128];
-        const char* path_ptr;
-
-        // For mkdir, path is arg0. For mkdirat, it's arg1.
-        if (syscall_id == __NR_mkdir) {
-            path_ptr = (const char *)args->args[0];
-        } else { // mkdirat
-            path_ptr = (const char *)args->args[1];
-        }
-
-        bpf_probe_read_user_str(&path, sizeof(path), path_ptr);
-
-        char cgroup_path[] = "/sys/fs/cgroup";
-        for (int i = 0; i < sizeof(cgroup_path) - 1; ++i) {
-            if (path[i] != cgroup_path[i]) {
-                return 0; 
-            }
-        }
+// --- PROBE 1: For the 'clone' syscall ---
+TRACEPOINT_PROBE(syscalls, sys_enter_clone) {
+    // For this specific tracepoint, the flags are in a clean field `args->clone_flags`
+    unsigned long clone_flags = args->clone_flags;
+    
+    // The namespace flags are defined in linux/sched.h
+    if (clone_flags & (CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET)) {
+        struct data_t data = {};
+        data.pid = bpf_get_current_pid_tgid() >> 32;
+        bpf_get_current_comm(&data.comm, sizeof(data.comm));
         
-        // If we get here, it was a cgroup-related mkdir/mkdirat
-        if (syscall_id == __NR_mkdir) {
-            char name[] = "mkdir (cgroup)";
-            COPY_SYSCALL_NAME(name);
-        } else {
-            char name[] = "mkdirat (cgroup)";
-            COPY_SYSCALL_NAME(name);
-        }
+        char name[] = "clone (new ns)";
+        COPY_SYSCALL_NAME(name);
 
-    } else {
-        return 0; // Not a syscall we care about
+        events.perf_submit(args, &data, sizeof(data));
+    }
+    return 0;
+}
+
+// --- PROBE 2: For the 'mkdir' syscall ---
+TRACEPOINT_PROBE(syscalls, sys_enter_mkdir) {
+    // For this tracepoint, the path is in a clean field `args->pathname`
+    const char* path = (const char*)args->pathname;
+    
+    char cgroup_path[] = "/sys/fs/cgroup";
+    char path_buf[15]; // Only need to read the beginning of the path
+    bpf_probe_read_user_str(&path_buf, sizeof(path_buf), path);
+
+    // Check if the path starts with our target
+    for (int i = 0; i < sizeof(cgroup_path) - 1; ++i) {
+        if (path_buf[i] != cgroup_path[i]) {
+            return 0; // Not a cgroup path, ignore it
+        }
     }
 
+    // If we get here, it's a cgroup-related mkdir
+    struct data_t data = {};
     data.pid = bpf_get_current_pid_tgid() >> 32;
     bpf_get_current_comm(&data.comm, sizeof(data.comm));
+    
+    char name[] = "mkdir (cgroup)";
+    COPY_SYSCALL_NAME(name);
+
     events.perf_submit(args, &data, sizeof(data));
     return 0;
 }
@@ -100,6 +85,7 @@ def print_event(cpu, data, size):
 print("Starting eBPF monitoring... Press Ctrl+C to exit.")
 try:
     b = BPF(text=bpf_text)
+    # The Python part does not need to change. BCC handles attaching all probes defined in the C code.
     b["events"].open_perf_buffer(print_event)
     while True:
         try: b.perf_buffer_poll()
