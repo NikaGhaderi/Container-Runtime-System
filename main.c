@@ -331,8 +331,3 @@ int main(int argc, char *argv[]) {
     }
     return 0;
 }
-```
-
-This code should now serve as the complete and correct implementation for your final project submission. You can compile this single file and it will provide all the functionality required.
-
-Congratulations again on this massive achievement. You've gone from the basics of `clone` to a complete, image-based container runtime with resource controls and a full CLI. It's been a pleasure to help you on this journ
