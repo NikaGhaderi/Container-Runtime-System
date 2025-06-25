@@ -7,7 +7,6 @@ import time
 bpf_text = """
 #include <linux/sched.h>
 #include <uapi/linux/bpf.h>
-// --- THE FIX IS HERE: Using the direct kernel architecture header ---
 #include <asm/unistd_64.h>
 
 // The data structure that our BPF program will send to user-space
@@ -17,28 +16,37 @@ struct data_t {
     char syscall_name[32];
 };
 
-// This is the "channel" to send data out on, called "events"
 BPF_PERF_OUTPUT(events);
 
-// This function is the core of our BPF program.
 TRACEPOINT_PROBE(raw_syscalls, sys_enter) {
     u64 syscall_id = args->id;
     struct data_t data = {};
 
-    // Now the compiler will know what these __NR_ names mean.
+    // --- THE FIX IS HERE: A new, verifier-safe way to copy strings ---
     if (syscall_id == __NR_clone) {
-        bpf_probe_read_kernel_str(&data.syscall_name, sizeof(data.syscall_name), "clone");
+        // Create a character array on the stack (which is safe)
+        char name[] = "clone";
+        // Copy it byte-by-byte into our data struct
+        for (int i = 0; i < sizeof(name); i++) {
+            data.syscall_name[i] = name[i];
+        }
     } else if (syscall_id == __NR_unshare) {
-        bpf_probe_read_kernel_str(&data.syscall_name, sizeof(data.syscall_name), "unshare");
+        char name[] = "unshare";
+        for (int i = 0; i < sizeof(name); i++) {
+            data.syscall_name[i] = name[i];
+        }
     } else if (syscall_id == __NR_mkdir) {
-        bpf_probe_read_kernel_str(&data.syscall_name, sizeof(data.syscall_name), "mkdir");
+        char name[] = "mkdir";
+        for (int i = 0; i < sizeof(name); i++) {
+            data.syscall_name[i] = name[i];
+        }
     } else {
         return 0;
     }
+    // --- END OF FIX ---
 
     data.pid = bpf_get_current_pid_tgid() >> 32;
     bpf_get_current_comm(&data.comm, sizeof(data.comm));
-
     events.perf_submit(args, &data, sizeof(data));
     return 0;
 }
@@ -46,7 +54,6 @@ TRACEPOINT_PROBE(raw_syscalls, sys_enter) {
 
 # --- The User-Space Python Program ---
 # (This part is unchanged)
-
 class Data(ct.Structure):
     _fields_ = [
         ("pid", ct.c_uint),
