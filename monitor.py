@@ -4,7 +4,7 @@ import ctypes as ct
 import time
 
 bpf_text = """
-#include <linux/sched.h> // <-- Needed for the CLONE_NEW* flags
+#include <linux/sched.h>
 #include <uapi/linux/bpf.h>
 #include <asm/unistd_64.h>
 
@@ -17,8 +17,6 @@ struct data_t {
 BPF_PERF_OUTPUT(events);
 
 #define COPY_SYSCALL_NAME(name) __builtin_memcpy(&data.syscall_name, name, sizeof(name))
-
-// Define a bitmask of all the namespace flags we care about
 #define ALL_NS_FLAGS (CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET)
 
 TRACEPOINT_PROBE(raw_syscalls, sys_enter) {
@@ -26,30 +24,36 @@ TRACEPOINT_PROBE(raw_syscalls, sys_enter) {
     struct data_t data = {};
 
     if (syscall_id == __NR_clone) {
-        // --- NEW: Read the clone_flags from the first argument ---
         unsigned long clone_flags = (unsigned long)args->args[0];
-
-        // --- NEW: Check if any of the namespace flags are set ---
         if (clone_flags & ALL_NS_FLAGS) {
             char name[] = "clone (new ns)";
             COPY_SYSCALL_NAME(name);
         } else {
-            return 0; // Not a namespace clone, ignore it
+            return 0;
         }
 
     } else if (syscall_id == __NR_unshare) {
-        // We can apply the same logic to unshare
         unsigned long unshare_flags = (unsigned long)args->args[0];
         if (unshare_flags & ALL_NS_FLAGS) {
             char name[] = "unshare";
             COPY_SYSCALL_NAME(name);
         } else {
-            return 0; // Not a namespace unshare, ignore it
+            return 0;
         }
 
-    } else if (syscall_id == __NR_mkdir) {
+    // --- THE FIX IS HERE: We now check for both mkdir and mkdirat ---
+    } else if (syscall_id == __NR_mkdir || syscall_id == __NR_mkdirat) {
         char path[128];
-        bpf_probe_read_user_str(&path, sizeof(path), (const char *)args->args[0]);
+        const char* path_ptr;
+
+        // For mkdir, path is arg0. For mkdirat, it's arg1.
+        if (syscall_id == __NR_mkdir) {
+            path_ptr = (const char *)args->args[0];
+        } else { // mkdirat
+            path_ptr = (const char *)args->args[1];
+        }
+
+        bpf_probe_read_user_str(&path, sizeof(path), path_ptr);
 
         char cgroup_path[] = "/sys/fs/cgroup";
         for (int i = 0; i < sizeof(cgroup_path) - 1; ++i) {
@@ -57,8 +61,15 @@ TRACEPOINT_PROBE(raw_syscalls, sys_enter) {
                 return 0; 
             }
         }
-        char name[] = "mkdir (cgroup)";
-        COPY_SYSCALL_NAME(name);
+        
+        // If we get here, it was a cgroup-related mkdir/mkdirat
+        if (syscall_id == __NR_mkdir) {
+            char name[] = "mkdir (cgroup)";
+            COPY_SYSCALL_NAME(name);
+        } else {
+            char name[] = "mkdirat (cgroup)";
+            COPY_SYSCALL_NAME(name);
+        }
 
     } else {
         return 0; // Not a syscall we care about
