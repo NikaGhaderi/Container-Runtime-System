@@ -21,7 +21,6 @@
 #define NEXT_CPU_FILE "/tmp/my_runtime_next_cpu"
 
 // --- Helper Functions ---
-
 void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
     if (f == NULL) {
@@ -100,21 +99,20 @@ long find_cgroup_value(const char* path, const char* key) {
 
 
 // --- CLI Command Functions ---
-// --- MODIFIED do_run: All detach logic has been removed ---
 int do_run(int argc, char *argv[]) {
     setup_cgroup_hierarchy();
-    char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0;
+    char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0;
 
     static struct option long_options[] = {
-            {"mem", required_argument, 0, 'm'}, {"cpu", required_argument, 0, 'C'},
-            {"pin-cpu", no_argument, NULL, 'p'}, {0, 0, 0, 0}
+        {"mem", required_argument, 0, 'm'}, {"cpu", required_argument, 0, 'C'},
+        {"pin-cpu", no_argument, NULL, 'p'}, {"detach", no_argument, NULL, 'd'},
+        {0, 0, 0, 0}
     };
     int opt;
-    // Removed 'd' from the getopt string
-    while ((opt = getopt_long(argc, argv, "+m:C:p", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "+m:C:pd", long_options, NULL)) != -1) {
         switch (opt) {
             case 'm': mem_limit = optarg; break; case 'C': cpu_quota = optarg; break;
-            case 'p': pin_cpu_flag = 1; break;
+            case 'p': pin_cpu_flag = 1; break; case 'd': detach_flag = 1; break;
             default: return 1;
         }
     }
@@ -122,34 +120,49 @@ int do_run(int argc, char *argv[]) {
     char* image_name = argv[optind];
     char** container_cmd_argv = &argv[optind + 1];
 
-    // --- All OverlayFS and clone logic is the same ---
+    if (detach_flag) {
+        if (fork() != 0) { exit(0); }
+        setsid();
+        freopen("/dev/null", "r", stdin); freopen("/dev/null", "w", stdout); freopen("/dev/null", "w", stderr);
+    }
+
     char lowerdir[PATH_MAX], upperdir[PATH_MAX], workdir[PATH_MAX], merged[PATH_MAX];
-    srand(time(NULL) ^ getpid()); int random_id = rand() % 10000;
+    srand(time(NULL) ^ getpid());
+    int random_id = rand() % 10000;
     snprintf(lowerdir, sizeof(lowerdir), "%s", image_name);
     snprintf(upperdir, sizeof(upperdir), "overlay_layers/%d/upper", random_id);
     snprintf(workdir, sizeof(workdir), "overlay_layers/%d/work", random_id);
     snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
-    char command[PATH_MAX * 2]; sprintf(command, "mkdir -p %s %s %s", upperdir, workdir, merged);
+    char command[PATH_MAX * 2];
+    sprintf(command, "mkdir -p %s %s %s", upperdir, workdir, merged);
     if (system(command) != 0) { return 1; }
-    char mount_opts[PATH_MAX * 3]; snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
+    
+    char mount_opts[PATH_MAX * 3];
+    snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
     if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("Overlay mount failed"); return 1; }
 
-    struct container_args args; args.merged_path = merged; args.argv = container_cmd_argv;
-    char *container_stack = malloc(STACK_SIZE); char *stack_top = container_stack + STACK_SIZE;
+    struct container_args args;
+    args.merged_path = merged;
+    args.argv = container_cmd_argv;
+    char *container_stack = malloc(STACK_SIZE);
+    char *stack_top = container_stack + STACK_SIZE;
+
+    // --- THE FIX IS HERE: Restoring SIGCHLD ---
     pid_t container_pid = clone(container_main, stack_top, CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD, &args);
 
     if (container_pid == -1) { perror("clone"); return 1; }
-
-    // --- All state and cgroup setup is the same ---
+    
     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
     char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, container_pid);
     if(mkdir(cgroup_path, 0755) != 0 && errno != EEXIST) { perror("Failed to create container cgroup"); }
+
     char cmd_path[PATH_MAX]; snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
     FILE *cmd_file = fopen(cmd_path, "w");
     if (cmd_file) {
         for (int i = 0; container_cmd_argv[i] != NULL; i++) { fprintf(cmd_file, "%s ", container_cmd_argv[i]); }
         fclose(cmd_file);
     }
+    
     if (pin_cpu_flag) {
         FILE *f = fopen(NEXT_CPU_FILE, "r+"); int next_cpu = 0; if (f) { fscanf(f, "%d", &next_cpu); } else { f = fopen(NEXT_CPU_FILE, "w"); } long num_cpus = sysconf(_SC_NPROCESSORS_ONLN); int target_cpu = next_cpu % num_cpus; cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(target_cpu, &cpuset); sched_setaffinity(container_pid, sizeof(cpu_set_t), &cpuset); struct sched_param param = { .sched_priority = 50 }; sched_setscheduler(container_pid, SCHED_RR, &param); fseek(f, 0, SEEK_SET); fprintf(f, "%d", target_cpu + 1); fclose(f);
     }
@@ -162,18 +175,22 @@ int do_run(int argc, char *argv[]) {
         snprintf(cpu_content, sizeof(cpu_content), "%s 100000", cpu_quota);
         write_file(cpu_path, cpu_content);
     }
+    
     char procs_path[PATH_MAX]; snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
     char pid_str[16]; snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
     write_file(procs_path, pid_str);
 
-    // The program now ONLY runs in the foreground.
+    if (detach_flag) {
+        printf("Container started with PID %d\n", container_pid);
+        return 0;
+    }
+
     printf("Container started with PID %d. Press Ctrl+C to stop.\n", container_pid);
     waitpid(container_pid, NULL, 0);
+    
     printf("Container %d has exited.\n", container_pid);
-    // Cleanup is now handled by the 'rm' command.
     return 0;
 }
-
 
 int do_list(int argc, char *argv[]) {
     DIR *d = opendir(MY_RUNTIME_STATE);
