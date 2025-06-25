@@ -1,4 +1,4 @@
-// File: container_project_complete.c
+// File: container_final_stable.c
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,24 +18,27 @@
 #define STACK_SIZE (1024 * 1024)
 #define MY_RUNTIME_CGROUP "/sys/fs/cgroup/my_runtime"
 #define MY_RUNTIME_STATE "/run/my_runtime"
-#define NEXT_CPU_FILE "/tmp/my_runtime_next_cpu"
 
-// --- Helper Functions ---
+// --- Helper Functions with Error Checking ---
+
 void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
     if (f == NULL) {
         fprintf(stderr, "ERROR: Failed to open %s for writing: ", path);
         perror("");
-        return;
+        // In a real-world scenario, you might handle this more gracefully
+    } else {
+        fprintf(f, "%s", content);
+        fclose(f);
     }
-    fprintf(f, "%s", content);
-    fclose(f);
 }
 
 void setup_cgroup_hierarchy() {
     mkdir(MY_RUNTIME_CGROUP, 0755);
     mkdir(MY_RUNTIME_STATE, 0755);
-    system("echo \"+cpu +memory +pids\" > /sys/fs/cgroup/my_runtime/cgroup.subtree_control 2>/dev/null || true");
+    if (system("echo \"+cpu +memory +pids\" > /sys/fs/cgroup/my_runtime/cgroup.subtree_control 2>/dev/null") != 0) {
+        // This is not a fatal error, as it's expected to fail on subsequent runs.
+    }
 }
 
 struct container_args {
@@ -54,65 +57,20 @@ int container_main(void *arg) {
     return 1;
 }
 
-long read_cgroup_long(const char *path) {
-    long value = -1;
-    FILE *f = fopen(path, "r");
-    if (!f) return -1;
-    if (fscanf(f, "%ld", &value) != 1) { value = -1; }
-    fclose(f);
-    return value;
-}
-
-void format_bytes(long bytes, char *buf, size_t size) {
-    const char* suffixes[] = {"B", "KB", "MB", "GB", "TB"};
-    int i = 0;
-    double d_bytes = bytes;
-    if (bytes < 0) {
-        snprintf(buf, size, "N/A");
-        return;
-    }
-    while (d_bytes >= 1024 && i < 4) {
-        d_bytes /= 1024;
-        i++;
-    }
-    snprintf(buf, size, "%.2f %s", d_bytes, suffixes[i]);
-}
-
-long find_cgroup_value(const char* path, const char* key) {
-   FILE* f = fopen(path, "r");
-   if (!f) return -1;
-   char line_buf[256];
-   long value = -1;
-   while (fgets(line_buf, sizeof(line_buf), f) != NULL) {
-       char key_buf[128];
-       long val_buf;
-       if (sscanf(line_buf, "%s %ld", key_buf, &val_buf) == 2) {
-           if (strcmp(key_buf, key) == 0) {
-               value = val_buf;
-               break;
-           }
-       }
-   }
-   fclose(f);
-   return value;
-}
-
-
 // --- CLI Command Functions ---
-int do_run(int argc, char *argv[]) {
-    setup_cgroup_hierarchy();
-    char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0;
 
+int do_run(int argc, char *argv[]) {
+    printf("[run] Starting...\n");
+    setup_cgroup_hierarchy();
+    
+    char *mem_limit = NULL; char *cpu_quota = NULL;
     static struct option long_options[] = {
-        {"mem", required_argument, 0, 'm'}, {"cpu", required_argument, 0, 'C'},
-        {"pin-cpu", no_argument, NULL, 'p'}, {"detach", no_argument, NULL, 'd'},
-        {0, 0, 0, 0}
+        {"mem", required_argument, 0, 'm'}, {"cpu", required_argument, 0, 'C'}, {0, 0, 0, 0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "+m:C:pd", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "+m:C:", long_options, NULL)) != -1) {
         switch (opt) {
             case 'm': mem_limit = optarg; break; case 'C': cpu_quota = optarg; break;
-            case 'p': pin_cpu_flag = 1; break; case 'd': detach_flag = 1; break;
             default: return 1;
         }
     }
@@ -120,41 +78,35 @@ int do_run(int argc, char *argv[]) {
     char* image_name = argv[optind];
     char** container_cmd_argv = &argv[optind + 1];
 
-    if (detach_flag) {
-        if (fork() != 0) { exit(0); }
-        setsid();
-        freopen("/dev/null", "r", stdin); freopen("/dev/null", "w", stdout); freopen("/dev/null", "w", stderr);
-    }
-
+    printf("[run] Setting up overlay directories...\n");
     char lowerdir[PATH_MAX], upperdir[PATH_MAX], workdir[PATH_MAX], merged[PATH_MAX];
-    srand(time(NULL) ^ getpid());
-    int random_id = rand() % 10000;
+    srand(time(NULL) ^ getpid()); int random_id = rand() % 10000;
     snprintf(lowerdir, sizeof(lowerdir), "%s", image_name);
     snprintf(upperdir, sizeof(upperdir), "overlay_layers/%d/upper", random_id);
     snprintf(workdir, sizeof(workdir), "overlay_layers/%d/work", random_id);
     snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
     char command[PATH_MAX * 2];
     sprintf(command, "mkdir -p %s %s %s", upperdir, workdir, merged);
-    if (system(command) != 0) { return 1; }
-    
+    if (system(command) != 0) { fprintf(stderr, "ERROR: Failed to create overlay directories\n"); return 1; }
+
+    printf("[run] Mounting overlayfs...\n");
     char mount_opts[PATH_MAX * 3];
     snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
-    if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("Overlay mount failed"); return 1; }
+    if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("ERROR: Overlay mount failed"); return 1; }
 
-    struct container_args args;
-    args.merged_path = merged;
-    args.argv = container_cmd_argv;
+    struct container_args args; args.merged_path = merged; args.argv = container_cmd_argv;
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
-
-    // --- THE FIX IS HERE: Restoring SIGCHLD ---
+    
+    printf("[run] Cloning container process...\n");
     pid_t container_pid = clone(container_main, stack_top, CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD, &args);
 
-    if (container_pid == -1) { perror("clone"); return 1; }
+    if (container_pid == -1) { perror("ERROR: clone failed"); return 1; }
     
+    printf("[run] Setting up cgroup and state for PID %d...\n", container_pid);
     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
     char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, container_pid);
-    if(mkdir(cgroup_path, 0755) != 0 && errno != EEXIST) { perror("Failed to create container cgroup"); }
+    if(mkdir(cgroup_path, 0755) != 0 && errno != EEXIST) { perror("ERROR: Failed to create container cgroup"); }
 
     char cmd_path[PATH_MAX]; snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
     FILE *cmd_file = fopen(cmd_path, "w");
@@ -180,15 +132,11 @@ int do_run(int argc, char *argv[]) {
     char pid_str[16]; snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
     write_file(procs_path, pid_str);
 
-    if (detach_flag) {
-        printf("Container started with PID %d\n", container_pid);
-        return 0;
-    }
-
-    printf("Container started with PID %d. Press Ctrl+C to stop.\n", container_pid);
+    printf("[run] Handing off to container. Waiting for exit...\n");
     waitpid(container_pid, NULL, 0);
+    printf("[run] Container %d has exited.\n", container_pid);
     
-    printf("Container %d has exited.\n", container_pid);
+    // The 'rm' command is responsible for cleanup.
     return 0;
 }
 
