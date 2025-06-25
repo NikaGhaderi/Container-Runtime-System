@@ -8,6 +8,7 @@ import time
 bpf_text = """
 #include <linux/sched.h>
 #include <uapi/linux/bpf.h>
+#include <asm/unistd_64.h>
 
 // The data structure that our BPF program will send to user-space
 struct data_t {
