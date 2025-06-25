@@ -16,7 +16,6 @@ struct data_t {
 
 BPF_PERF_OUTPUT(events);
 
-// This is a helper macro to make the string copying cleaner
 #define COPY_SYSCALL_NAME(name) __builtin_memcpy(&data.syscall_name, name, sizeof(name))
 
 TRACEPOINT_PROBE(raw_syscalls, sys_enter) {
@@ -30,29 +29,25 @@ TRACEPOINT_PROBE(raw_syscalls, sys_enter) {
         char name[] = "unshare";
         COPY_SYSCALL_NAME(name);
     } else if (syscall_id == __NR_mkdir) {
-        // --- NEW FILTERING LOGIC ---
-        // For mkdir, we need to read the path argument to see if it's for a cgroup.
         char path[128];
-        // Read the first argument of the syscall (the path) into our buffer
-        bpf_probe_read_user_str(&path, sizeof(path), (const char *)PT_REGS_PARM1(args));
+        
+        // --- THE FINAL FIX IS HERE ---
+        // We use args->args[0] to get the first syscall argument, which is the path.
+        bpf_probe_read_user_str(&path, sizeof(path), (const char *)args->args[0]);
 
-        // Check if the path starts with "/sys/fs/cgroup"
         char cgroup_path[] = "/sys/fs/cgroup";
         for (int i = 0; i < sizeof(cgroup_path) - 1; ++i) {
             if (path[i] != cgroup_path[i]) {
-                return 0; // If it doesn't match, ignore this mkdir and exit
+                return 0;
             }
         }
-
-        // If it does match, we log it.
         char name[] = "mkdir (cgroup)";
         COPY_SYSCALL_NAME(name);
 
     } else {
-        return 0; // Not a syscall we care about
+        return 0;
     }
 
-    // This part only runs if we didn't exit above
     data.pid = bpf_get_current_pid_tgid() >> 32;
     bpf_get_current_comm(&data.comm, sizeof(data.comm));
     events.perf_submit(args, &data, sizeof(data));
