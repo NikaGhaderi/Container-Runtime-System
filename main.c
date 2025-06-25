@@ -182,7 +182,7 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[1], "list") == 0) {
         return do_list(argc - 1, &argv[1]);
     } else if (strcmp(argv[1], "status") == 0) {
-        // return do_status(argc - 1, &argv[1]); // You can re-enable this
+         return do_status(argc - 1, &argv[1]); // You can re-enable this
     } else if (strcmp(argv[1], "freeze") == 0) {
         return do_freeze(argc - 1, &argv[1]);
     } else if (strcmp(argv[1], "thaw") == 0) {
