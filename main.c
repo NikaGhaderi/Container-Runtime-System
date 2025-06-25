@@ -39,7 +39,7 @@ struct container_args {
     int readonly;     // A flag (1 if readonly, 0 otherwise)
 };
 
-// --- MODIFIED: container_main now accepts the struct ---
+// The corrected container_main function
 int container_main(void *arg) {
     struct container_args *args = (struct container_args*)arg;
 
@@ -47,14 +47,16 @@ int container_main(void *arg) {
     if (chroot(args->rootfs) != 0) { perror("chroot failed"); return 1; }
     if (chdir("/") != 0) { perror("chdir failed"); return 1; }
     
-    // --- NEW: Read-only Filesystem Logic ---
     if (args->readonly) {
-        // First, make all mounts private to this namespace to avoid affecting the host
-        syscall(SYS_mount, "none", "/", NULL, MS_REC | MS_PRIVATE, NULL);
+        // Make all mounts private to this namespace first.
+        // This prevents our read-only change from affecting the host.
+        if (syscall(SYS_mount, "none", "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) {
+            perror("mount private failed");
+        }
         
-        // Now, remount the new root as read-only
-        // Using raw syscall is more reliable for remounts
-        if (syscall(SYS_mount, "none", "/", NULL, MS_RDONLY | MS_BIND | MS_REMOUNT, NULL) != 0) {
+        // --- THE FIX IS HERE: We removed MS_BIND ---
+        // Also changed "none" to NULL, which is more standard for remounts.
+        if (syscall(SYS_mount, NULL, "/", NULL, MS_RDONLY | MS_REMOUNT, NULL) != 0) {
             perror("remount readonly failed");
         }
 
@@ -63,7 +65,6 @@ int container_main(void *arg) {
             perror("mount tmpfs failed");
         }
     }
-    // --- END of new logic ---
 
     // Mount the new /proc for the container's PID namespace
     if (mount("proc", "/proc", "proc", 0, NULL) != 0) { perror("mount proc failed"); }
