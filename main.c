@@ -73,37 +73,77 @@ void write_file(const char *path, const char *content) {
     fclose(f);
 }
 
+int container_main(void *arg) {
+    // We'll pass the command-line arguments struct to container_main
+    struct container_args *args = (struct container_args*)arg;
+
+    sethostname("container", 9);
+    if (chroot(args->rootfs) != 0) { perror("chroot failed"); return 1; }
+    if (chdir("/") != 0) { perror("chdir failed"); return 1; }
+
+    // --- NEW: Read-only Filesystem Logic ---
+    if (args->readonly) {
+        printf("[CHILD] Making root filesystem read-only.\n");
+        // We use the raw syscall here as glibc's mount wrapper can be tricky
+        syscall(SYS_mount, "none", "/", NULL, MS_REC | MS_PRIVATE, NULL);
+        syscall(SYS_mount, "none", "/", NULL, MS_RDONLY | MS_BIND | MS_REMOUNT, NULL);
+
+        printf("[CHILD] Mounting writable /tmp.\n");
+        mount("tmpfs", "/tmp", "tmpfs", 0, NULL);
+    }
+    // --- END of new logic ---
+
+    mount("proc", "/proc", "proc", 0, NULL);
+    
+    execv(args->argv[0], args->argv);
+    perror("execv failed");
+    return 1;
+}
+
+// We need a small struct to pass multiple arguments to container_main
+struct container_args {
+    char **argv;
+    char *rootfs;
+    int readonly;
+};
+
 
 
 int do_run(int argc, char *argv[]) {
     setup_cgroup_hierarchy();
-
+    
+    // --- ADD the --readonly flag ---
+    int readonly_flag = 0;
+    
     char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0;
     static struct option long_options[] = {
-            {"pin-cpu", no_argument, NULL, 'p'}, {"detach",  no_argument, NULL, 'd'}, {0, 0, 0, 0}
+        {"pin-cpu",  no_argument, NULL, 'p'},
+        {"detach",   no_argument, NULL, 'd'},
+        {"readonly", no_argument, &readonly_flag, 1}, // New readonly flag
+        {0, 0, 0, 0}
     };
     int opt;
+    // Add to the optstring
     while ((opt = getopt_long(argc, argv, "+m:C:pd", long_options, NULL)) != -1) {
-        switch (opt) {
+         switch (opt) {
             case 'm': mem_limit = optarg; break; case 'C': cpu_quota = optarg; break;
             case 'p': pin_cpu_flag = 1; break; case 'd': detach_flag = 1; break;
             default: fprintf(stderr, "Usage: %s run [--detach] ...\n", argv[0]); return 1;
         }
     }
     if (optind + 1 >= argc) { fprintf(stderr, "Usage: %s run [--detach] ...\n", argv[0]); return 1; }
+    
+    // Package arguments into our struct
+    struct container_args args;
+    args.argv = &argv[optind + 1]; // Command is after rootfs path
+    args.rootfs = argv[optind];
+    args.readonly = readonly_flag;
 
-    if (detach_flag) {
-        if (fork() != 0) { exit(0); }
-        setsid();
-        freopen("/dev/null", "r", stdin);
-        freopen("/dev/null", "w", stdout);
-        freopen("/dev/null", "w", stderr);
-    }
-
-    char **container_argv = &argv[optind];
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
-    pid_t container_pid = clone(container_main, stack_top, CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD, container_argv);
+    
+    // Pass the address of our args struct to clone
+    pid_t container_pid = clone(container_main, stack_top, CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS, &args);
 
     if (container_pid == -1) { perror("clone"); return 1; }
 
@@ -136,6 +176,70 @@ int do_run(int argc, char *argv[]) {
 
     return 0;
 }
+
+
+
+// int do_run(int argc, char *argv[]) {
+//     setup_cgroup_hierarchy();
+
+//     char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0;
+//     static struct option long_options[] = {
+//             {"pin-cpu", no_argument, NULL, 'p'}, {"detach",  no_argument, NULL, 'd'}, {0, 0, 0, 0}
+//     };
+//     int opt;
+//     while ((opt = getopt_long(argc, argv, "+m:C:pd", long_options, NULL)) != -1) {
+//         switch (opt) {
+//             case 'm': mem_limit = optarg; break; case 'C': cpu_quota = optarg; break;
+//             case 'p': pin_cpu_flag = 1; break; case 'd': detach_flag = 1; break;
+//             default: fprintf(stderr, "Usage: %s run [--detach] ...\n", argv[0]); return 1;
+//         }
+//     }
+//     if (optind + 1 >= argc) { fprintf(stderr, "Usage: %s run [--detach] ...\n", argv[0]); return 1; }
+
+//     if (detach_flag) {
+//         if (fork() != 0) { exit(0); }
+//         setsid();
+//         freopen("/dev/null", "r", stdin);
+//         freopen("/dev/null", "w", stdout);
+//         freopen("/dev/null", "w", stderr);
+//     }
+
+//     char **container_argv = &argv[optind];
+//     char *container_stack = malloc(STACK_SIZE);
+//     char *stack_top = container_stack + STACK_SIZE;
+//     pid_t container_pid = clone(container_main, stack_top, CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD, container_argv);
+
+//     if (container_pid == -1) { perror("clone"); return 1; }
+
+//     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
+//     char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, container_pid); mkdir(cgroup_path, 0755);
+
+//     char cmd_path[PATH_MAX];
+//     snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
+//     FILE *cmd_file = fopen(cmd_path, "w");
+//     if (cmd_file) {
+//         for (int i = 0; container_argv[i] != NULL; i++) { fprintf(cmd_file, "%s ", container_argv[i]); }
+//         fclose(cmd_file);
+//     }
+
+//     // Set resource limits and add process to cgroup...
+
+//     char procs_path[PATH_MAX]; char pid_str[16];
+//     snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
+//     snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
+//     write_file(procs_path, pid_str);
+
+//     if (detach_flag) { return 0; }
+
+//     printf("Container started with PID %d. Press Ctrl+C to stop.\n", container_pid);
+//     waitpid(container_pid, NULL, 0);
+
+//     // Cleanup for the foreground container
+//     char cmd_to_remove[PATH_MAX]; snprintf(cmd_to_remove, sizeof(cmd_to_remove), "%s/command", state_dir); remove(cmd_to_remove);
+//     rmdir(state_dir); rmdir(cgroup_path);
+
+//     return 0;
+// }
 
 // Helper to find a specific key in a cgroup stats file
 long find_cgroup_value(const char* path, const char* key) {
