@@ -13,6 +13,9 @@
 #include <limits.h>
 #include <getopt.h>
 #include <dirent.h>
+#include <bpf/bpf.h>
+#include <bpf/libbpf.h>
+
 
 #define STACK_SIZE (1024 * 1024)
 #define MY_RUNTIME_CGROUP "/sys/fs/cgroup/my_runtime"
@@ -23,9 +26,11 @@
 void write_file(const char *path, const char *content) { /* ... */
     FILE *f = fopen(path, "w"); if (f == NULL) { return; } fprintf(f, "%s", content); fclose(f);
 }
-void setup_cgroup_hierarchy() { /* ... */
+void setup_cgroup_hierarchy() {
     if (mkdir(MY_RUNTIME_STATE, 0755) != 0 && errno != EEXIST) { perror("mkdir runtime state dir failed"); }
-    if (access(MY_RUNTIME_CGROUP, F_OK) == 0) return; if (mkdir(MY_RUNTIME_CGROUP, 0755) != 0 && errno != EEXIST) { perror("mkdir my_runtime failed"); return; } char subtree_control_path[PATH_MAX]; snprintf(subtree_control_path, sizeof(subtree_control_path), "%s/cgroup.subtree_control", MY_RUNTIME_CGROUP); write_file(subtree_control_path, "+cpu +memory +pids");
+    if (access(MY_RUNTIME_CGROUP, F_OK) == 0) return;
+    if (mkdir(MY_RUNTIME_CGROUP, 0755) != 0 && errno != EEXIST) { perror("mkdir my_runtime failed"); return; } char subtree_control_path[PATH_MAX];
+    snprintf(subtree_control_path, sizeof(subtree_control_path), "%s/cgroup.subtree_control", MY_RUNTIME_CGROUP); write_file(subtree_control_path, "+cpu +memory +pids");
 }
 int container_main(void *arg) { /* ... */
     sethostname("container", 9); char *rootfs = ((char **)arg)[0]; if (chroot(rootfs) != 0) { perror("chroot failed"); return 1; } if (chdir("/") != 0) { perror("chdir failed"); return 1; } mount("proc", "/proc", "proc", 0, NULL); char **argv = &(((char **)arg)[1]); execv(argv[0], argv); perror("[CHILD] !!! execv FAILED"); return 1;
@@ -151,6 +156,64 @@ int do_status(int argc, char *argv[]) { /* ... */
     char path_buffer[PATH_MAX]; snprintf(path_buffer, sizeof(path_buffer), "%s/memory.current", cgroup_path); print_file_content("Memory Usage (bytes)", path_buffer);
     snprintf(path_buffer, sizeof(path_buffer), "%s/cpu.stat", cgroup_path); print_file_content("CPU Stats", path_buffer); return 0;
 }
+void trace_syscalls() {
+    struct bpf_object *obj;
+    int err = bpf_object__open_file("ebpf_program.o", &obj);
+    if (err) {
+        fprintf(stderr, "Failed to open eBPF program: %d\n", err);
+        return;
+    }
+
+    err = bpf_object__load(obj);
+    if (err) {
+        fprintf(stderr, "Failed to load eBPF program: %d\n", err);
+        return;
+    }
+
+    int prog_fd = bpf_program__fd(bpf_object__next_program(obj, NULL));
+    err = bpf_attach_kprobe("__x64_sys_clone", prog_fd);
+    if (err) {
+        fprintf(stderr, "Failed to attach kprobe: %d\n", err);
+        return;
+    }
+
+    err = bpf_attach_kprobe("__x64_sys_unshare", prog_fd);
+    if (err) {
+        fprintf(stderr, "Failed to attach kprobe: %d\n", err);
+        return;
+    }
+
+    err = bpf_attach_kprobe("__x64_sys_setns", prog_fd);
+    if (err) {
+        fprintf(stderr, "Failed to attach kprobe: %d\n", err);
+        return;
+    }
+
+    err = bpf_attach_kprobe("__x64_sys_mkdir", prog_fd);
+    if (err) {
+        fprintf(stderr, "Failed to attach kprobe: %d\n", err);
+        return;
+    }
+
+    err = bpf_attach_kprobe("__x64_sys_mount", prog_fd);
+    if (err) {
+        fprintf(stderr, "Failed to attach kprobe: %d\n", err);
+        return;
+    }
+
+    err = bpf_attach_kprobe("__x64_sys_cgroup_mkdir", prog_fd);
+    if (err) {
+        fprintf(stderr, "Failed to attach kprobe: %d\n", err);
+        return;
+    }
+
+    err = bpf_attach_kprobe("__x64_sys_cgroup_destroy", prog_fd);
+    if (err) {
+        fprintf(stderr, "Failed to attach kprobe: %d\n", err);
+        return;
+    }
+}
+
 int main(int argc, char *argv[]) { /* ... */
     if (argc < 2) { fprintf(stderr, "Usage: %s <command> [args...]\nCommands: run, list, status\n", argv[0]); return 1; }
     if (strcmp(argv[1], "run") == 0) { return do_run(argc - 1, &argv[1]);
