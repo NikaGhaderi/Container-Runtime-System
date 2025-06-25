@@ -3,13 +3,11 @@ from bcc import BPF
 import ctypes as ct
 import time
 
-# This is our eBPF program written in C.
 bpf_text = """
 #include <linux/sched.h>
 #include <uapi/linux/bpf.h>
 #include <asm/unistd_64.h>
 
-// The data structure that our BPF program will send to user-space
 struct data_t {
     u32 pid;
     char comm[TASK_COMM_LEN];
@@ -18,33 +16,43 @@ struct data_t {
 
 BPF_PERF_OUTPUT(events);
 
+// This is a helper macro to make the string copying cleaner
+#define COPY_SYSCALL_NAME(name) __builtin_memcpy(&data.syscall_name, name, sizeof(name))
+
 TRACEPOINT_PROBE(raw_syscalls, sys_enter) {
     u64 syscall_id = args->id;
     struct data_t data = {};
 
-    // --- THE FIX IS HERE: A new, verifier-safe way to copy strings ---
     if (syscall_id == __NR_clone) {
-        // Create a character array on the stack (which is safe)
         char name[] = "clone";
-        // Copy it byte-by-byte into our data struct
-        for (int i = 0; i < sizeof(name); i++) {
-            data.syscall_name[i] = name[i];
-        }
+        COPY_SYSCALL_NAME(name);
     } else if (syscall_id == __NR_unshare) {
         char name[] = "unshare";
-        for (int i = 0; i < sizeof(name); i++) {
-            data.syscall_name[i] = name[i];
-        }
+        COPY_SYSCALL_NAME(name);
     } else if (syscall_id == __NR_mkdir) {
-        char name[] = "mkdir";
-        for (int i = 0; i < sizeof(name); i++) {
-            data.syscall_name[i] = name[i];
-        }
-    } else {
-        return 0;
-    }
-    // --- END OF FIX ---
+        // --- NEW FILTERING LOGIC ---
+        // For mkdir, we need to read the path argument to see if it's for a cgroup.
+        char path[128];
+        // Read the first argument of the syscall (the path) into our buffer
+        bpf_probe_read_user_str(&path, sizeof(path), (const char *)PT_REGS_PARM1(args));
 
+        // Check if the path starts with "/sys/fs/cgroup"
+        char cgroup_path[] = "/sys/fs/cgroup";
+        for (int i = 0; i < sizeof(cgroup_path) - 1; ++i) {
+            if (path[i] != cgroup_path[i]) {
+                return 0; // If it doesn't match, ignore this mkdir and exit
+            }
+        }
+
+        // If it does match, we log it.
+        char name[] = "mkdir (cgroup)";
+        COPY_SYSCALL_NAME(name);
+
+    } else {
+        return 0; // Not a syscall we care about
+    }
+
+    // This part only runs if we didn't exit above
     data.pid = bpf_get_current_pid_tgid() >> 32;
     bpf_get_current_comm(&data.comm, sizeof(data.comm));
     events.perf_submit(args, &data, sizeof(data));
@@ -52,15 +60,11 @@ TRACEPOINT_PROBE(raw_syscalls, sys_enter) {
 }
 """
 
-# --- The User-Space Python Program ---
-# (This part is unchanged)
+# --- The User-Space Python Program is unchanged ---
 class Data(ct.Structure):
     _fields_ = [
-        ("pid", ct.c_uint),
-        ("comm", ct.c_char * 16),
-        ("syscall_name", ct.c_char * 32),
+        ("pid", ct.c_uint), ("comm", ct.c_char * 16), ("syscall_name", ct.c_char * 32),
     ]
-
 def print_event(cpu, data, size):
     event = ct.cast(data, ct.POINTER(Data)).contents
     current_time = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -71,15 +75,13 @@ def print_event(cpu, data, size):
     with open("ebpf_log.txt", "a") as f:
         f.write(log_line)
 
-# --- Main program execution ---
+# --- Main program execution is unchanged ---
 print("Starting eBPF monitoring... Press Ctrl+C to exit.")
 try:
     b = BPF(text=bpf_text)
     b["events"].open_perf_buffer(print_event)
     while True:
-        try:
-            b.perf_buffer_poll()
-        except KeyboardInterrupt:
-            exit()
+        try: b.perf_buffer_poll()
+        except KeyboardInterrupt: exit()
 except Exception as e:
     print(f"Error: {e}")
