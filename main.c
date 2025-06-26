@@ -135,20 +135,25 @@ long find_cgroup_value(const char* path, const char* key) {
 
 int do_run(int argc, char *argv[]) {
     setup_cgroup_hierarchy();
-    char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0;
+    char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0; int share_ipc_flag = 0;
     char pid_str[16];
 
     static struct option long_options[] = {
-        {"mem", required_argument, 0, 'm'}, {"cpu", required_argument, 0, 'C'},
-        {"pin-cpu", no_argument, NULL, 'p'}, {"detach",  no_argument, NULL, 'd'}, {0, 0, 0, 0}
+        {"mem", required_argument, 0, 'm'},
+        {"cpu", required_argument, 0, 'C'},
+        {"pin-cpu", no_argument, NULL, 'p'},
+        {"detach", no_argument, NULL, 'd'},
+        {"share-ipc", no_argument, NULL, 'i'}, // New option for shared IPC
+        {0, 0, 0, 0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "+m:C:pd", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "+m:C:pdi", long_options, NULL)) != -1) {
         switch (opt) {
             case 'm': mem_limit = optarg; break;
             case 'C': cpu_quota = optarg; break;
             case 'p': pin_cpu_flag = 1; break;
             case 'd': detach_flag = 1; break;
+            case 'i': share_ipc_flag = 1; break; // Set IPC sharing flag
             default: return 1;
         }
     }
@@ -182,7 +187,11 @@ int do_run(int argc, char *argv[]) {
     args.argv = container_cmd_argv;
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
-    pid_t container_pid = clone(container_main, stack_top, CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD, &args);
+    int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD;
+    if (!share_ipc_flag) {
+        clone_flags |= CLONE_NEWIPC; // Only use new IPC namespace if --share-ipc is not set
+    }
+    pid_t container_pid = clone(container_main, stack_top, clone_flags, &args);
 
     if (container_pid == -1) { perror("clone"); return 1; }
     
@@ -211,6 +220,11 @@ int do_run(int argc, char *argv[]) {
         write_file(path_buffer, "1");
     }
     
+    if (share_ipc_flag) {
+        snprintf(path_buffer, sizeof(path_buffer), "%s/share_ipc", state_dir);
+        write_file(path_buffer, "1"); // Save IPC sharing state
+    }
+    
     if (pin_cpu_flag) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/pin_cpu", state_dir);
         write_file(path_buffer, "1");
@@ -233,7 +247,7 @@ int do_run(int argc, char *argv[]) {
             return 1;
         }
         fseek(f, 0, SEEK_SET);
-        fprintf(f, "%d", (next_cpu + 1) % num_cpus); // Corrected to cycle through CPUs
+        fprintf(f, "%d", (next_cpu + 1) % num_cpus);
         fclose(f);
     }
     if (mem_limit) {
@@ -268,6 +282,7 @@ int do_run(int argc, char *argv[]) {
     printf("Container %d has exited. Use 'rm' to clean up.\n", container_pid);
     return 0;
 }
+
 
 
 int do_list(int argc, char *argv[]) {
@@ -375,10 +390,15 @@ int do_start(int argc, char *argv[]) {
     }
 
     int original_detach_flag = 0;
+    int share_ipc_flag = 0;
     char path_buffer[PATH_MAX];
     snprintf(path_buffer, sizeof(path_buffer), "%s/detach", old_state_dir);
     if (access(path_buffer, F_OK) == 0) {
         original_detach_flag = 1;
+    }
+    snprintf(path_buffer, sizeof(path_buffer), "%s/share_ipc", old_state_dir);
+    if (access(path_buffer, F_OK) == 0) {
+        share_ipc_flag = 1; // Check if IPC sharing was enabled
     }
 
     printf("Starting container %s...\n", pid_str);
@@ -430,7 +450,11 @@ int do_start(int argc, char *argv[]) {
     struct container_args args; args.merged_path = merged; args.argv = argv_for_container;
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
-    pid_t new_pid = clone(container_main, stack_top, CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD, &args);
+    int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD;
+    if (!share_ipc_flag) {
+        clone_flags |= CLONE_NEWIPC; // Only use new IPC namespace if --share-ipc is not set
+    }
+    pid_t new_pid = clone(container_main, stack_top, clone_flags, &args);
 
     if (new_pid == -1) { perror("clone failed on start"); return 1; }
 
@@ -461,7 +485,7 @@ int do_start(int argc, char *argv[]) {
             return 1;
         }
         fseek(f_cpu, 0, SEEK_SET); 
-        fprintf(f_cpu, "%d", (next_cpu + 1) % num_cpus); // Corrected to cycle through CPUs
+        fprintf(f_cpu, "%d", (next_cpu + 1) % num_cpus);
         fclose(f_cpu);
     }
     if (strlen(mem_limit) > 0) {
@@ -495,6 +519,7 @@ int do_start(int argc, char *argv[]) {
 
     return 0;
 }
+
 int do_rm(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s rm <container_pid>\n", argv[0]);
