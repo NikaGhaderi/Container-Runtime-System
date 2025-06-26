@@ -37,7 +37,7 @@ echo "--> Creating base image at ./${IMAGE_DIR}"
 COMMANDS=(
     "/bin/bash" "/bin/ls" "/bin/cat" "/bin/echo" "/bin/ps" "/bin/sleep"
     "/bin/touch" "/bin/rm" "/bin/mkdir" "/bin/mount" "/bin/umount"
-    "/usr/bin/free" "/usr/bin/head" "/usr/bin/tail" "/usr/bin/stress"
+    "/bin/dd" "/usr/bin/free" "/usr/bin/head" "/usr/bin/tail" "/usr/bin/stress"
 )
 
 # Create the basic directory structure for the image
@@ -97,7 +97,7 @@ copy_binary_with_deps() {
     fi
     local dest_binary="${IMAGE_DIR}/usr/bin/$binary_path"
     if [ "$binary_path" = "shm_writer" ] || [ "$binary_path" = "shm_reader" ]; then
-        dest_binary="${IMAGE_IMAGE_DIR}/usr/bin/$binary_path"
+        dest_binary="${IMAGE_DIR}/usr/bin/$binary_path"
     else
         dest_binary="${IMAGE_DIR}${binary_path}"
     fi
@@ -121,5 +121,9 @@ done
 # Copy shm_writer and shm_reader
 copy_binary_with_deps "shm_writer"
 copy_binary_with_deps "shm_reader"
+
+# Create /bin/sh symlink to /bin/bash
+echo "--> Creating /bin/sh symlink to /bin/bash..."
+ln -sf /bin/bash "${IMAGE_DIR}/bin/sh"
 
 echo "--> Base image setup complete."
