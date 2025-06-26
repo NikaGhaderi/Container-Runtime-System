@@ -105,8 +105,7 @@ int do_run(int argc, char *argv[]) {
 
     static struct option long_options[] = {
         {"mem", required_argument, 0, 'm'}, {"cpu", required_argument, 0, 'C'},
-        {"pin-cpu", no_argument, NULL, 'p'}, {"detach",  no_argument, NULL, 'd'},
-        {0, 0, 0, 0}
+        {"pin-cpu", no_argument, NULL, 'p'}, {"detach",  no_argument, NULL, 'd'}, {0, 0, 0, 0}
     };
     int opt;
     while ((opt = getopt_long(argc, argv, "+m:C:pd", long_options, NULL)) != -1) {
@@ -201,7 +200,6 @@ int do_run(int argc, char *argv[]) {
     }
     
     char procs_path[PATH_MAX];
-    char pid_str[16];
     snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
     snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
     write_file(procs_path, pid_str);
@@ -346,7 +344,7 @@ int do_start(int argc, char *argv[]) {
     snprintf(lowerdir, sizeof(lowerdir), "%s", image_name);
     snprintf(upperdir, sizeof(upperdir), "overlay_layers/%s/upper", overlay_id);
     snprintf(workdir, sizeof(workdir), "overlay_layers/%s/work", overlay_id);
-    snprintf(merged, sizeof(merged), "overlay_layers/%s/merged", random_id);
+    snprintf(merged, sizeof(merged), "overlay_layers/%s/merged", overlay_id);
     
     char mount_opts[PATH_MAX * 3];
     snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
@@ -374,7 +372,15 @@ int do_start(int argc, char *argv[]) {
     char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, new_pid);
     mkdir(cgroup_path, 0755);
     
-    if (pin_cpu_flag) { /* Re-apply pin logic */ }
+    if (pin_cpu_flag) {
+        FILE *f_cpu = fopen(NEXT_CPU_FILE, "r+"); int next_cpu = 0; if (f_cpu) { fscanf(f_cpu, "%d", &next_cpu); } else { f_cpu = fopen(NEXT_CPU_FILE, "w"); }
+        long num_cpus = sysconf(_SC_NPROCESSORS_ONLN); int target_cpu = next_cpu % num_cpus;
+        cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(target_cpu, &cpuset);
+        sched_setaffinity(new_pid, sizeof(cpu_set_t), &cpuset);
+        struct sched_param param = { .sched_priority = 50 };
+        sched_setscheduler(new_pid, SCHED_RR, &param);
+        fseek(f_cpu, 0, SEEK_SET); fprintf(f_cpu, "%d", target_cpu + 1); fclose(f_cpu);
+    }
     if (strlen(mem_limit) > 0) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/memory.max", cgroup_path); write_file(path_buffer, mem_limit);
         snprintf(path_buffer, sizeof(path_buffer), "%s/memory.swap.max", cgroup_path); write_file(path_buffer, "0");
@@ -429,8 +435,7 @@ int do_rm(int argc, char *argv[]) {
     rmdir(cgroup_dir);
 
     char cmd_path[PATH_MAX]; snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
-    remove(overlay_id_path);
-    remove(cmd_path);
+    remove(overlay_id_path); remove(cmd_path);
     char mem_limit_path[PATH_MAX]; snprintf(mem_limit_path, sizeof(mem_limit_path), "%s/mem_limit", state_dir); remove(mem_limit_path);
     char cpu_quota_path[PATH_MAX]; snprintf(cpu_quota_path, sizeof(cpu_quota_path), "%s/cpu_quota", state_dir); remove(cpu_quota_path);
     char pin_cpu_path[PATH_MAX]; snprintf(pin_cpu_path, sizeof(pin_cpu_path), "%s/pin_cpu", state_dir); remove(pin_cpu_path);
