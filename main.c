@@ -20,6 +20,34 @@
 #define NEXT_CPU_FILE "/tmp/my_runtime_next_cpu"
 
 // --- Helper Functions ---
+void cleanup_mounts(int pid) {
+    char state_dir[PATH_MAX];
+    snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, pid);
+    char overlay_id_path[PATH_MAX];
+    snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
+    int random_id = -1;
+    FILE* id_file = fopen(overlay_id_path, "r");
+    if (id_file) {
+        fscanf(id_file, "%d", &random_id);
+        fclose(id_file);
+    }
+    if (random_id != -1) {
+        char merged[PATH_MAX];
+        snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
+        char proc_to_unmount[PATH_MAX];
+        snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
+        // Unmount /proc with lazy detach
+        if (umount2(proc_to_unmount, MNT_DETACH) != 0) {
+            perror("umount2 proc failed");
+        }
+        // Unmount overlay with lazy detach
+        if (umount2(merged, MNT_DETACH) != 0) {
+            perror("umount2 overlay failed");
+        }
+    }
+}
+
+
 void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
     if (f == NULL) {
@@ -292,11 +320,19 @@ int do_thaw(int argc, char *argv[]) {
 }
 
 int do_stop(int argc, char *argv[]) {
-    if (argc < 2) { fprintf(stderr, "Usage: %s stop <container_pid>\n", argv[0]); return 1; }
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s stop <container_pid>\n", argv[0]);
+        return 1;
+    }
     pid_t pid = atoi(argv[1]);
     printf("Stopping container %d...\n", pid);
     if (kill(pid, SIGKILL) != 0) {
         perror("kill failed");
+    } else {
+        // Wait for process to exit
+        waitpid(pid, NULL, 0);
+        // Clean up mounts after stopping
+        cleanup_mounts(pid);
     }
     printf("Container %d stopped.\n", pid);
     return 0;
@@ -426,52 +462,44 @@ int do_start(int argc, char *argv[]) {
     return 0;
 }
 
-// --- The Corrected `do_rm` function ---
 int do_rm(int argc, char *argv[]) {
-    if (argc < 2) { fprintf(stderr, "Usage: %s rm <container_pid>\n", argv[0]); return 1; }
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s rm <container_pid>\n", argv[0]);
+        return 1;
+    }
     char *pid_str = argv[1];
-    char proc_path[PATH_MAX]; snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
+    char proc_path[PATH_MAX];
+    snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
+    // Check if container is still running
     if (access(proc_path, F_OK) == 0) {
-        fprintf(stderr, "Error: Cannot remove a running container. Please use 'stop' first.\n");
+        fprintf(stderr, "Error: Cannot remove a running container. Use 'stop' first.\n");
         return 1;
     }
     printf("Removing container %s...\n", pid_str);
-    
-    char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
-    char overlay_id_path[PATH_MAX]; snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
-    
+    // Ensure mounts are cleaned up before removal
+    cleanup_mounts(atoi(pid_str));
+    // Remove overlay and state directories
+    char command[PATH_MAX];
+    char state_dir[PATH_MAX];
+    snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
+    char overlay_id_path[PATH_MAX];
+    snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
     int random_id = -1;
     FILE* id_file = fopen(overlay_id_path, "r");
     if (id_file) {
         fscanf(id_file, "%d", &random_id);
         fclose(id_file);
     }
-
     if (random_id != -1) {
-        char merged[PATH_MAX], command[PATH_MAX * 2];
-        snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
-        
-        // --- THE FIX IS HERE: Aggressive unmount before removing ---
-        char umount_cmd[PATH_MAX * 2];
-        sprintf(umount_cmd, "umount -f -l %s/proc 2>/dev/null || true", merged);
-        system(umount_cmd);
-        sprintf(umount_cmd, "umount -f -l %s 2>/dev/null || true", merged);
-        system(umount_cmd);
-        
-        sprintf(command, "rm -rf overlay_layers/%d", random_id);
+        snprintf(command, sizeof(command), "rm -rf overlay_layers/%d", random_id);
         system(command);
     }
-
-    char cgroup_dir[PATH_MAX]; snprintf(cgroup_dir, sizeof(cgroup_dir), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
-    rmdir(cgroup_dir);
-    
-    char rm_state_cmd[PATH_MAX];
-    sprintf(rm_state_cmd, "rm -rf %s", state_dir);
-    system(rm_state_cmd);
-    
+    snprintf(command, sizeof(command), "rm -rf %s", state_dir);
+    system(command);
     printf("Container %s removed.\n", pid_str);
     return 0;
 }
+
 
 
 int main(int argc, char *argv[]) {
