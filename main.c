@@ -22,11 +22,7 @@
 // --- Helper Functions ---
 void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
-    if (f == NULL) {
-        fprintf(stderr, "ERROR: Failed to open %s for writing: ", path);
-        perror("");
-        return;
-    }
+    if (f == NULL) { return; }
     fprintf(f, "%s", content);
     fclose(f);
 }
@@ -52,6 +48,7 @@ int container_main(void *arg) {
     perror("execv failed");
     return 1;
 }
+
 
 long read_cgroup_long(const char *path) {
     long value = -1;
@@ -404,17 +401,27 @@ int do_start(int argc, char *argv[]) {
 }
 
 int do_rm(int argc, char *argv[]) {
-    if (argc < 2) { fprintf(stderr, "Usage: %s rm <container_pid>\n", argv[0]); return 1; }
-    char *pid_str = argv[1];
-    char proc_path[PATH_MAX]; snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
-    if (access(proc_path, F_OK) == 0) {
-        fprintf(stderr, "Error: Cannot remove a running container. Please use 'stop' first.\n");
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s rm <container_pid>\n", argv[0]);
         return 1;
     }
+    char *pid_str = argv[1];
+    
+    char proc_path[PATH_MAX];
+    snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
+    if (access(proc_path, F_OK) == 0) {
+        fprintf(stderr, "Error: Cannot remove a running container. Stop it first.\n");
+        return 1;
+    }
+
     printf("Removing container %s...\n", pid_str);
     
-    char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
-    char overlay_id_path[PATH_MAX]; snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
+    char state_dir[PATH_MAX];
+    snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
+    
+    char overlay_id_path[PATH_MAX];
+    snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
+    
     int random_id = -1;
     FILE* id_file = fopen(overlay_id_path, "r");
     if (id_file) {
@@ -423,23 +430,31 @@ int do_rm(int argc, char *argv[]) {
     }
 
     if (random_id != -1) {
-        char merged[PATH_MAX], command[PATH_MAX * 2];
+        char merged[PATH_MAX];
         snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
-        char proc_to_unmount[PATH_MAX]; snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
-        umount(proc_to_unmount);
-        umount(merged);
-        sprintf(command, "rm -rf overlay_layers/%d", random_id);
-        system(command);
+
+        // --- THE FIX IS HERE ---
+        // Forcefully unmount the inner procfs and the main overlayfs before deleting.
+        char umount_cmd[PATH_MAX * 2];
+        sprintf(umount_cmd, "umount -f -l %s/proc 2>/dev/null || true", merged);
+        system(umount_cmd);
+        sprintf(umount_cmd, "umount -f -l %s 2>/dev/null || true", merged);
+        system(umount_cmd);
+
+        // Now remove the directories.
+        char rm_cmd[PATH_MAX];
+        sprintf(rm_cmd, "rm -rf overlay_layers/%d", random_id);
+        system(rm_cmd);
     }
 
-    char cgroup_dir[PATH_MAX]; snprintf(cgroup_dir, sizeof(cgroup_dir), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
+    char cgroup_dir[PATH_MAX];
+    snprintf(cgroup_dir, sizeof(cgroup_dir), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
     rmdir(cgroup_dir);
 
-    char cmd_path[PATH_MAX]; snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
-    remove(overlay_id_path); remove(cmd_path);
-    char mem_limit_path[PATH_MAX]; snprintf(mem_limit_path, sizeof(mem_limit_path), "%s/mem_limit", state_dir); remove(mem_limit_path);
-    char cpu_quota_path[PATH_MAX]; snprintf(cpu_quota_path, sizeof(cpu_quota_path), "%s/cpu_quota", state_dir); remove(cpu_quota_path);
-    char pin_cpu_path[PATH_MAX]; snprintf(pin_cpu_path, sizeof(pin_cpu_path), "%s/pin_cpu", state_dir); remove(pin_cpu_path);
+    char cmd_path[PATH_MAX];
+    snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
+    remove(overlay_id_path);
+    remove(cmd_path);
     rmdir(state_dir);
     
     printf("Container %s removed.\n", pid_str);
