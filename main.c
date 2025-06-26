@@ -22,7 +22,11 @@
 // --- Helper Functions ---
 void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
-    if (f == NULL) { return; }
+    if (f == NULL) {
+        fprintf(stderr, "ERROR: Failed to open %s for writing: ", path);
+        perror("");
+        return;
+    }
     fprintf(f, "%s", content);
     fclose(f);
 }
@@ -60,32 +64,46 @@ long read_cgroup_long(const char *path) {
 
 void format_bytes(long bytes, char *buf, size_t size) {
     const char* suffixes[] = {"B", "KB", "MB", "GB", "TB"};
-    int i = 0; double d_bytes = bytes;
-    if (bytes < 0) { snprintf(buf, size, "N/A"); return; }
-    while (d_bytes >= 1024 && i < 4) { d_bytes /= 1024; i++; }
+    int i = 0;
+    double d_bytes = bytes;
+    if (bytes < 0) {
+        snprintf(buf, size, "N/A");
+        return;
+    }
+    while (d_bytes >= 1024 && i < 4) {
+        d_bytes /= 1024;
+        i++;
+    }
     snprintf(buf, size, "%.2f %s", d_bytes, suffixes[i]);
 }
 
 long find_cgroup_value(const char* path, const char* key) {
    FILE* f = fopen(path, "r");
    if (!f) return -1;
-   char line_buf[256]; long value = -1;
+   char line_buf[256];
+   long value = -1;
    while (fgets(line_buf, sizeof(line_buf), f) != NULL) {
-       char key_buf[128]; long val_buf;
+       char key_buf[128];
+       long val_buf;
        if (sscanf(line_buf, "%s %ld", key_buf, &val_buf) == 2) {
-           if (strcmp(key_buf, key) == 0) { value = val_buf; break; }
+           if (strcmp(key_buf, key) == 0) {
+               value = val_buf;
+               break;
+           }
        }
    }
    fclose(f);
    return value;
 }
 
+
 // --- CLI Command Functions ---
 
 int do_run(int argc, char *argv[]) {
     setup_cgroup_hierarchy();
     char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0;
-    char pid_str[16]; 
+    char pid_str[16];
+
     static struct option long_options[] = {
         {"mem", required_argument, 0, 'm'}, {"cpu", required_argument, 0, 'C'},
         {"pin-cpu", no_argument, NULL, 'p'}, {"detach",  no_argument, NULL, 'd'}, {0, 0, 0, 0}
@@ -161,6 +179,13 @@ int do_run(int argc, char *argv[]) {
     if (pin_cpu_flag) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/pin_cpu", state_dir);
         write_file(path_buffer, "1");
+        FILE *f = fopen(NEXT_CPU_FILE, "r+"); int next_cpu = 0; if (f) { fscanf(f, "%d", &next_cpu); } else { f = fopen(NEXT_CPU_FILE, "w"); }
+        long num_cpus = sysconf(_SC_NPROCESSORS_ONLN); int target_cpu = next_cpu % num_cpus;
+        cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(target_cpu, &cpuset);
+        sched_setaffinity(container_pid, sizeof(cpu_set_t), &cpuset);
+        struct sched_param param = { .sched_priority = 50 };
+        sched_setscheduler(container_pid, SCHED_RR, &param);
+        fseek(f, 0, SEEK_SET); fprintf(f, "%d", target_cpu + 1); fclose(f);
     }
     if (mem_limit) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/mem_limit", state_dir);
@@ -307,10 +332,10 @@ int do_start(int argc, char *argv[]) {
     f = fopen(path_buffer, "r"); if (f) { fgets(command_str, sizeof(command_str)-1, f); fclose(f); }
 
     snprintf(path_buffer, sizeof(path_buffer), "%s/mem_limit", old_state_dir);
-    f = fopen(path_buffer, "r"); if (f) { fgets(mem_limit, sizeof(mem_limit)-1, f); fclose(f); }
+    if (access(path_buffer, F_OK) == 0) { f = fopen(path_buffer, "r"); if (f) { fgets(mem_limit, sizeof(mem_limit)-1, f); fclose(f); } }
     
     snprintf(path_buffer, sizeof(path_buffer), "%s/cpu_quota", old_state_dir);
-    f = fopen(path_buffer, "r"); if (f) { fgets(cpu_quota, sizeof(cpu_quota)-1, f); fclose(f); }
+    if (access(path_buffer, F_OK) == 0) { f = fopen(path_buffer, "r"); if (f) { fgets(cpu_quota, sizeof(cpu_quota)-1, f); fclose(f); } }
     
     snprintf(path_buffer, sizeof(path_buffer), "%s/pin_cpu", old_state_dir);
     if (access(path_buffer, F_OK) == 0) { pin_cpu_flag = 1; }
