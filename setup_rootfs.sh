@@ -41,7 +41,7 @@ COMMANDS=(
 )
 
 # Create the basic directory structure for the image
-mkdir -p "${IMAGE_DIR}"/{bin,lib,lib64,usr/bin,proc,tmp}
+mkdir -p "${IMAGE_DIR}"/{bin,lib,lib64,usr/bin,proc,tmp,dev}
 
 # Compile shm_writer and shm_reader if not already compiled
 if [ ! -f "shm_writer" ] || [ ! -f "shm_reader" ]; then
@@ -125,5 +125,14 @@ copy_binary_with_deps "shm_reader"
 # Create /bin/sh symlink to /bin/bash
 echo "--> Creating /bin/sh symlink to /bin/bash..."
 ln -sf /bin/bash "${IMAGE_DIR}/bin/sh"
+
+# Create device nodes
+echo "--> Creating device nodes in ${IMAGE_DIR}/dev..."
+# Create /dev/zero (character device, major:1, minor:5)
+mknod -m 666 "${IMAGE_DIR}/dev/zero" c 1 5
+
+# Create /dev/sda (block device, major:8, minor:0)
+# Note: This assumes /dev/sda is the target device for io.max limits
+mknod -m 660 "${IMAGE_DIR}/dev/sda" b 8 0
 
 echo "--> Base image setup complete."
