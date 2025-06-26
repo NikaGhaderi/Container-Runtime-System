@@ -102,7 +102,6 @@ long find_cgroup_value(const char* path, const char* key) {
 int do_run(int argc, char *argv[]) {
     setup_cgroup_hierarchy();
     char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0;
-    char pid_str[16];
 
     static struct option long_options[] = {
         {"mem", required_argument, 0, 'm'}, {"cpu", required_argument, 0, 'C'},
@@ -172,6 +171,10 @@ int do_run(int argc, char *argv[]) {
     snprintf(path_buffer, sizeof(path_buffer), "%s/overlay_id", state_dir);
     write_file(path_buffer, random_id_str);
     
+    if (detach_flag) {
+        snprintf(path_buffer, sizeof(path_buffer), "%s/detach", state_dir);
+        write_file(path_buffer, "1");
+    }
     if (pin_cpu_flag) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/pin_cpu", state_dir);
         write_file(path_buffer, "1");
@@ -201,6 +204,7 @@ int do_run(int argc, char *argv[]) {
     }
     
     char procs_path[PATH_MAX];
+    char pid_str[16];
     snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
     snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
     write_file(procs_path, pid_str);
@@ -315,7 +319,7 @@ int do_start(int argc, char *argv[]) {
     printf("Starting container %s...\n", pid_str);
     
     char image_name[PATH_MAX] = {0}; char overlay_id[16] = {0}; char command_str[1024] = {0};
-    char mem_limit[32] = {0}; char cpu_quota[32] = {0}; int pin_cpu_flag = 0;
+    char mem_limit[32] = {0}; char cpu_quota[32] = {0}; int pin_cpu_flag = 0; int detach_flag = 0;
     
     char path_buffer[PATH_MAX];
     snprintf(path_buffer, sizeof(path_buffer), "%s/image_name", old_state_dir);
@@ -336,9 +340,18 @@ int do_start(int argc, char *argv[]) {
     snprintf(path_buffer, sizeof(path_buffer), "%s/pin_cpu", old_state_dir);
     if (access(path_buffer, F_OK) == 0) { pin_cpu_flag = 1; }
 
+    snprintf(path_buffer, sizeof(path_buffer), "%s/detach", old_state_dir);
+    if (access(path_buffer, F_OK) == 0) { detach_flag = 1; }
+
     if (strlen(image_name) == 0 || strlen(overlay_id) == 0 || strlen(command_str) == 0) {
         fprintf(stderr, "Error: Container configuration is corrupt or missing.\n");
         return 1;
+    }
+    
+    if (detach_flag) {
+        if (fork() != 0) { exit(0); }
+        setsid();
+        freopen("/dev/null", "r", stdin); freopen("/dev/null", "w", stdout); freopen("/dev/null", "w", stderr);
     }
 
     char lowerdir[PATH_MAX], upperdir[PATH_MAX], workdir[PATH_MAX], merged[PATH_MAX];
@@ -397,12 +410,15 @@ int do_start(int argc, char *argv[]) {
     char new_pid_str[16]; snprintf(new_pid_str, sizeof(new_pid_str), "%d", new_pid);
     write_file(procs_path, new_pid_str);
     
+    if (detach_flag) {
+        printf("Container %s started with new PID %d\n", pid_str, new_pid);
+        return 0;
+    }
+    
     printf("Container %s started with new PID %d. Press Ctrl+C to stop.\n", pid_str, new_pid);
     waitpid(new_pid, NULL, 0);
     printf("Container %d has exited. Use 'rm' to clean up.\n", new_pid);
-
-
-    // --- NEW: Cleanup mounts after start finishes ---
+    
     char proc_to_unmount[PATH_MAX];
     snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
     umount(proc_to_unmount);
@@ -411,7 +427,6 @@ int do_start(int argc, char *argv[]) {
     return 0;
 }
 
-// --- The Corrected `do_rm` function ---
 int do_rm(int argc, char *argv[]) {
     if (argc < 2) { fprintf(stderr, "Usage: %s rm <container_pid>\n", argv[0]); return 1; }
     char *pid_str = argv[1];
@@ -424,7 +439,6 @@ int do_rm(int argc, char *argv[]) {
     
     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
     char overlay_id_path[PATH_MAX]; snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
-    
     int random_id = -1;
     FILE* id_file = fopen(overlay_id_path, "r");
     if (id_file) {
@@ -435,10 +449,11 @@ int do_rm(int argc, char *argv[]) {
     if (random_id != -1) {
         char merged[PATH_MAX], command[PATH_MAX * 2];
         snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
+        char proc_to_unmount[PATH_MAX]; snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
         
-        // --- THE FIX IS HERE: Aggressive unmount before removing ---
         char umount_cmd[PATH_MAX * 2];
         sprintf(umount_cmd, "umount -f -l %s/proc 2>/dev/null || true", merged);
+        sprintf(umount_cmd, "umount -f -l %s 2>/dev/null || true", proc_to_unmount);
         system(umount_cmd);
         sprintf(umount_cmd, "umount -f -l %s 2>/dev/null || true", merged);
         system(umount_cmd);
