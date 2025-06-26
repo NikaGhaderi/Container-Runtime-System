@@ -1,4 +1,4 @@
-// File: container_final_with_lifecycle.c
+// File: container_with_lifecycle.c
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,14 +20,10 @@
 #define MY_RUNTIME_STATE "/run/my_runtime"
 #define NEXT_CPU_FILE "/tmp/my_runtime_next_cpu"
 
-// --- Helper Functions ---
+// --- Helper Functions (Unchanged) ---
 void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
-    if (f == NULL) {
-        fprintf(stderr, "ERROR: Failed to open %s for writing: ", path);
-        perror("");
-        return;
-    }
+    if (f == NULL) { perror("fopen"); return; }
     fprintf(f, "%s", content);
     fclose(f);
 }
@@ -48,8 +44,9 @@ int container_main(void *arg) {
     sethostname("container", 9);
     if (chroot(args->merged_path) != 0) { perror("chroot failed"); return 1; }
     if (chdir("/") != 0) { perror("chdir failed"); return 1; }
-    if (mount("proc", "/proc", "proc", 0, NULL) != 0) { perror("mount proc failed"); }
-    execv(args->argv[0], args->argv);
+    if (mount("proc", "/proc", "proc", 0, NULL) != 0) { perror("mount proc failed"); return 1; }
+    char **argv = args->argv;
+    execv(argv[0], argv);
     perror("execv failed");
     return 1;
 }
@@ -79,37 +76,26 @@ long find_cgroup_value(const char* path, const char* key) {
 int do_run(int argc, char *argv[]) {
     setup_cgroup_hierarchy();
     char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0;
-
     static struct option long_options[] = {
-        {"mem", required_argument, 0, 'm'},
-        {"cpu", required_argument, 0, 'C'},
-        {"pin-cpu", no_argument, NULL, 'p'},
-        {"detach",  no_argument, NULL, 'd'},
-        {0, 0, 0, 0}
+        {"mem", required_argument, 0, 'm'}, {"cpu", required_argument, 0, 'C'},
+        {"pin-cpu", no_argument, NULL, 'p'}, {"detach",  no_argument, NULL, 'd'}, {0, 0, 0, 0}
     };
     int opt;
     while ((opt = getopt_long(argc, argv, "+m:C:pd", long_options, NULL)) != -1) {
         switch (opt) {
-            case 'm': mem_limit = optarg; break;
-            case 'C': cpu_quota = optarg; break;
-            case 'p': pin_cpu_flag = 1; break;
-            case 'd': detach_flag = 1; break;
+            case 'm': mem_limit = optarg; break; case 'C': cpu_quota = optarg; break;
+            case 'p': pin_cpu_flag = 1; break; case 'd': detach_flag = 1; break;
             default: return 1;
         }
     }
-    if (optind + 1 >= argc) {
-        fprintf(stderr, "Usage: %s run [opts] <image> <cmd>...\n", argv[0]);
-        return 1;
-    }
+    if (optind + 1 >= argc) { fprintf(stderr, "Usage: %s run [opts] <image> <cmd>...\n", argv[0]); return 1; }
     char* image_name = argv[optind];
     char** container_cmd_argv = &argv[optind + 1];
 
     if (detach_flag) {
         if (fork() != 0) { exit(0); }
         setsid();
-        freopen("/dev/null", "r", stdin);
-        freopen("/dev/null", "w", stdout);
-        freopen("/dev/null", "w", stderr);
+        freopen("/dev/null", "r", stdin); freopen("/dev/null", "w", stdout); freopen("/dev/null", "w", stderr);
     }
 
     char lowerdir[PATH_MAX], upperdir[PATH_MAX], workdir[PATH_MAX], merged[PATH_MAX];
@@ -125,10 +111,7 @@ int do_run(int argc, char *argv[]) {
     
     char mount_opts[PATH_MAX * 3];
     snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
-    if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) {
-        perror("Overlay mount failed");
-        return 1;
-    }
+    if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("Overlay mount failed"); return 1; }
 
     struct container_args args;
     args.merged_path = merged;
@@ -151,6 +134,7 @@ int do_run(int argc, char *argv[]) {
         fclose(cmd_file);
     }
     
+    // Save the overlay ID so the 'rm' command can find it for cleanup
     char overlay_id_path[PATH_MAX];
     snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
     char random_id_str[16];
@@ -177,6 +161,7 @@ int do_run(int argc, char *argv[]) {
     }
     
     char procs_path[PATH_MAX];
+    char pid_str[16];
     snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
     snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
     write_file(procs_path, pid_str);
@@ -189,6 +174,7 @@ int do_run(int argc, char *argv[]) {
     printf("Container started with PID %d. Press Ctrl+C to stop.\n", container_pid);
     waitpid(container_pid, NULL, 0);
     printf("Container %d has exited. Use 'rm' to clean up.\n", container_pid);
+    // CRITICAL CHANGE: No cleanup is performed here.
     return 0;
 }
 
@@ -204,6 +190,7 @@ int do_list(int argc, char *argv[]) {
         if (dir_entry->d_type != DT_DIR || strcmp(dir_entry->d_name, ".") == 0 || strcmp(dir_entry->d_name, "..") == 0) continue;
         char proc_path[PATH_MAX];
         snprintf(proc_path, sizeof(proc_path), "/proc/%s", dir_entry->d_name);
+        // Check /proc/[pid] to determine if the process is running.
         const char* status = (access(proc_path, F_OK) == 0) ? "Running" : "Stopped";
         char cmd_path[PATH_MAX], cmd_buf[1024] = {0};
         snprintf(cmd_path, sizeof(cmd_path), "%s/%s/command", MY_RUNTIME_STATE, dir_entry->d_name);
@@ -220,8 +207,19 @@ int do_list(int argc, char *argv[]) {
 }
 
 int do_status(int argc, char *argv[]) {
-    // This function is not implemented in this version, but can be added back.
-    printf("Status command not implemented in this version.\n");
+    if (argc < 2) { fprintf(stderr, "Usage: %s status <container_pid>\n", argv[0]); return 1; }
+    char *pid_str = argv[1];
+    char path_buffer[PATH_MAX];
+    printf("--- Status for Container PID %s ---\n", pid_str);
+    char cgroup_path[PATH_MAX];
+    snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
+    snprintf(path_buffer, sizeof(path_buffer), "%s/cpu.stat", cgroup_path);
+    long cpu_micros = find_cgroup_value(path_buffer, "usage_usec");
+    if (cpu_micros >= 0) {
+        printf("%-20s: %.2f seconds\n", "Total CPU Time", (double)cpu_micros / 1000000.0);
+    } else {
+        printf("Could not read CPU stats for container.\n");
+    }
     return 0;
 }
 
@@ -245,6 +243,8 @@ int do_thaw(int argc, char *argv[]) {
     return 0;
 }
 
+// --- NEW: stop, start, and rm commands ---
+
 int do_stop(int argc, char *argv[]) {
     if (argc < 2) { fprintf(stderr, "Usage: %s stop <container_pid>\n", argv[0]); return 1; }
     pid_t pid = atoi(argv[1]);
@@ -256,13 +256,20 @@ int do_stop(int argc, char *argv[]) {
     return 0;
 }
 
+int do_start(int argc, char *argv[]) {
+    fprintf(stderr, "Error: The 'start' command is a complex feature and is not implemented.\n");
+    fprintf(stderr, "To restart a container, please use 'rm' and then 'run' again.\n");
+    return 1;
+}
+
 int do_rm(int argc, char *argv[]) {
     if (argc < 2) { fprintf(stderr, "Usage: %s rm <container_pid>\n", argv[0]); return 1; }
     char *pid_str = argv[1];
+
     char proc_path[PATH_MAX];
     snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
     if (access(proc_path, F_OK) == 0) {
-        fprintf(stderr, "Error: Cannot remove a running container. Please stop it first.\n");
+        fprintf(stderr, "Error: Cannot remove a running container. Please use 'stop' first.\n");
         return 1;
     }
 
@@ -301,6 +308,8 @@ int do_rm(int argc, char *argv[]) {
     return 0;
 }
 
+
+// --- The main dispatcher function with all commands ---
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <command> [args...]\nCommands: run, list, status, freeze, thaw, stop, rm\n", argv[0]);
@@ -321,6 +330,8 @@ int main(int argc, char *argv[]) {
         return do_stop(argc - 1, &argv[1]);
     } else if (strcmp(argv[1], "rm") == 0) {
         return do_rm(argc - 1, &argv[1]);
+    } else if (strcmp(argv[1], "start") == 0) {
+        return do_start(argc - 1, &argv[1]);
     } else {
         fprintf(stderr, "Unknown command: %s\n", argv[1]);
         return 1;
