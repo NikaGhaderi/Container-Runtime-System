@@ -68,7 +68,7 @@ void write_file(const char *path, const char *content) {
 void setup_cgroup_hierarchy() {
     mkdir(MY_RUNTIME_CGROUP, 0755);
     mkdir(MY_RUNTIME_STATE, 0755);
-    system("echo \"+cpu +memory +pids\" > /sys/fs/cgroup/my_runtime/cgroup.subtree_control 2>/dev/null || true");
+    system("echo \"+cpu +memory +pids +io\" > /sys/fs/cgroup/my_runtime/cgroup.subtree_control 2>/dev/null || true");
 }
 
 struct container_args {
@@ -82,7 +82,7 @@ int container_main(void *arg) {
     if (chroot(args->merged_path) != 0) { perror("chroot failed"); return 1; }
     if (chdir("/") != 0) { perror("chdir failed"); return 1; }
     if (mount("proc", "/proc", "proc", 0, NULL) != 0) { perror("mount proc failed"); }
-    execv(args->argv[0], args->argv); // Fixed typo: removed undefined CHECKED macro
+    execv(args->argv[0], args->argv);
     perror("execv failed");
     return 1;
 }
