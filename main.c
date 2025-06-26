@@ -431,15 +431,17 @@ int do_start(int argc, char *argv[]) {
 int do_rm(int argc, char *argv[]) {
     if (argc < 2) { fprintf(stderr, "Usage: %s rm <container_pid>\n", argv[0]); return 1; }
     char *pid_str = argv[1];
-    char proc_path[PATH_MAX]; snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
+    char proc_path[PATH_MAX];
+    snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
     if (access(proc_path, F_OK) == 0) {
         fprintf(stderr, "Error: Cannot remove a running container. Please use 'stop' first.\n");
         return 1;
     }
     printf("Removing container %s...\n", pid_str);
-    
-    char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
-    char overlay_id_path[PATH_MAX]; snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
+    char state_dir[PATH_MAX];
+    snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
+    char overlay_id_path[PATH_MAX];
+    snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
     int random_id = -1;
     FILE* id_file = fopen(overlay_id_path, "r");
     if (id_file) {
@@ -450,21 +452,23 @@ int do_rm(int argc, char *argv[]) {
     if (random_id != -1) {
         char merged[PATH_MAX], command[PATH_MAX * 2];
         snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
-        char proc_to_unmount[PATH_MAX]; snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
         
+        // Use system calls for aggressive unmounting
         char umount_cmd[PATH_MAX * 2];
-        sprintf(umount_cmd, "umount -f -l %s 2>/dev/null || true", proc_to_unmount);
+        sprintf(umount_cmd, "umount -f -l %s/proc 2>/dev/null || true", merged);
         system(umount_cmd);
         sprintf(umount_cmd, "umount -f -l %s 2>/dev/null || true", merged);
         system(umount_cmd);
-        
+
         sprintf(command, "rm -rf overlay_layers/%d", random_id);
         system(command);
     }
 
-    char cgroup_dir[PATH_MAX]; snprintf(cgroup_dir, sizeof(cgroup_dir), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
+    char cgroup_dir[PATH_MAX];
+    snprintf(cgroup_dir, sizeof(cgroup_dir), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
     rmdir(cgroup_dir);
-    
+
+    // Use system("rm -rf") for robust state directory removal
     char rm_state_cmd[PATH_MAX];
     sprintf(rm_state_cmd, "rm -rf %s", state_dir);
     system(rm_state_cmd);
@@ -472,7 +476,6 @@ int do_rm(int argc, char *argv[]) {
     printf("Container %s removed.\n", pid_str);
     return 0;
 }
-
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
