@@ -400,9 +400,18 @@ int do_start(int argc, char *argv[]) {
     printf("Container %s started with new PID %d. Press Ctrl+C to stop.\n", pid_str, new_pid);
     waitpid(new_pid, NULL, 0);
     printf("Container %d has exited. Use 'rm' to clean up.\n", new_pid);
+
+
+    // --- NEW: Cleanup mounts after start finishes ---
+    char proc_to_unmount[PATH_MAX];
+    snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
+    umount(proc_to_unmount);
+    umount(merged);
+
     return 0;
 }
 
+// --- The Corrected `do_rm` function ---
 int do_rm(int argc, char *argv[]) {
     if (argc < 2) { fprintf(stderr, "Usage: %s rm <container_pid>\n", argv[0]); return 1; }
     char *pid_str = argv[1];
@@ -415,6 +424,7 @@ int do_rm(int argc, char *argv[]) {
     
     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
     char overlay_id_path[PATH_MAX]; snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
+    
     int random_id = -1;
     FILE* id_file = fopen(overlay_id_path, "r");
     if (id_file) {
@@ -425,10 +435,10 @@ int do_rm(int argc, char *argv[]) {
     if (random_id != -1) {
         char merged[PATH_MAX], command[PATH_MAX * 2];
         snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
-        char proc_to_unmount[PATH_MAX]; snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
         
+        // --- THE FIX IS HERE: Aggressive unmount before removing ---
         char umount_cmd[PATH_MAX * 2];
-        sprintf(umount_cmd, "umount -f -l %s 2>/dev/null || true", proc_to_unmount);
+        sprintf(umount_cmd, "umount -f -l %s/proc 2>/dev/null || true", merged);
         system(umount_cmd);
         sprintf(umount_cmd, "umount -f -l %s 2>/dev/null || true", merged);
         system(umount_cmd);
