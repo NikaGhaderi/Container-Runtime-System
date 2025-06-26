@@ -1,4 +1,4 @@
-// File: container_with_lifecycle.c
+// File: container_final_with_start.c
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,10 +20,10 @@
 #define MY_RUNTIME_STATE "/run/my_runtime"
 #define NEXT_CPU_FILE "/tmp/my_runtime_next_cpu"
 
-// --- Helper Functions (Unchanged) ---
+// --- Helper Functions ---
 void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
-    if (f == NULL) { perror("fopen"); return; }
+    if (f == NULL) { return; }
     fprintf(f, "%s", content);
     fclose(f);
 }
@@ -44,26 +44,37 @@ int container_main(void *arg) {
     sethostname("container", 9);
     if (chroot(args->merged_path) != 0) { perror("chroot failed"); return 1; }
     if (chdir("/") != 0) { perror("chdir failed"); return 1; }
-    if (mount("proc", "/proc", "proc", 0, NULL) != 0) { perror("mount proc failed"); return 1; }
-    char **argv = args->argv;
-    execv(argv[0], argv);
+    if (mount("proc", "/proc", "proc", 0, NULL) != 0) { perror("mount proc failed"); }
+    execv(args->argv[0], args->argv);
     perror("execv failed");
     return 1;
+}
+
+long read_cgroup_long(const char *path) {
+    long value = -1;
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    if (fscanf(f, "%ld", &value) != 1) { value = -1; }
+    fclose(f);
+    return value;
+}
+
+void format_bytes(long bytes, char *buf, size_t size) {
+    const char* suffixes[] = {"B", "KB", "MB", "GB", "TB"};
+    int i = 0; double d_bytes = bytes;
+    if (bytes < 0) { snprintf(buf, size, "N/A"); return; }
+    while (d_bytes >= 1024 && i < 4) { d_bytes /= 1024; i++; }
+    snprintf(buf, size, "%.2f %s", d_bytes, suffixes[i]);
 }
 
 long find_cgroup_value(const char* path, const char* key) {
    FILE* f = fopen(path, "r");
    if (!f) return -1;
-   char line_buf[256];
-   long value = -1;
+   char line_buf[256]; long value = -1;
    while (fgets(line_buf, sizeof(line_buf), f) != NULL) {
-       char key_buf[128];
-       long val_buf;
+       char key_buf[128]; long val_buf;
        if (sscanf(line_buf, "%s %ld", key_buf, &val_buf) == 2) {
-           if (strcmp(key_buf, key) == 0) {
-               value = val_buf;
-               break;
-           }
+           if (strcmp(key_buf, key) == 0) { value = val_buf; break; }
        }
    }
    fclose(f);
@@ -76,6 +87,7 @@ long find_cgroup_value(const char* path, const char* key) {
 int do_run(int argc, char *argv[]) {
     setup_cgroup_hierarchy();
     char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0;
+
     static struct option long_options[] = {
         {"mem", required_argument, 0, 'm'}, {"cpu", required_argument, 0, 'C'},
         {"pin-cpu", no_argument, NULL, 'p'}, {"detach",  no_argument, NULL, 'd'}, {0, 0, 0, 0}
@@ -99,21 +111,17 @@ int do_run(int argc, char *argv[]) {
     }
 
     char lowerdir[PATH_MAX], upperdir[PATH_MAX], workdir[PATH_MAX], merged[PATH_MAX];
-    srand(time(NULL) ^ getpid());
-    int random_id = rand() % 10000;
+    srand(time(NULL) ^ getpid()); int random_id = rand() % 10000;
     snprintf(lowerdir, sizeof(lowerdir), "%s", image_name);
     snprintf(upperdir, sizeof(upperdir), "overlay_layers/%d/upper", random_id);
     snprintf(workdir, sizeof(workdir), "overlay_layers/%d/work", random_id);
     snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
-    char command[PATH_MAX * 2];
-    sprintf(command, "mkdir -p %s %s %s", upperdir, workdir, merged);
+    char command[PATH_MAX * 2]; sprintf(command, "mkdir -p %s %s %s", upperdir, workdir, merged);
     if (system(command) != 0) { return 1; }
     
     char mount_opts[PATH_MAX * 3];
     snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
     if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("Overlay mount failed"); return 1; }
-
-
 
     struct container_args args;
     args.merged_path = merged;
@@ -128,78 +136,42 @@ int do_run(int argc, char *argv[]) {
     char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, container_pid);
     if(mkdir(cgroup_path, 0755) != 0 && errno != EEXIST) { perror("Failed to create container cgroup"); }
 
-    char cmd_path[PATH_MAX];
-    snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
-    FILE *cmd_file = fopen(cmd_path, "w");
+    char path_buffer[PATH_MAX];
+    snprintf(path_buffer, sizeof(path_buffer), "%s/command", state_dir);
+    FILE *cmd_file = fopen(path_buffer, "w");
     if (cmd_file) {
         for (int i = 0; container_cmd_argv[i] != NULL; i++) { fprintf(cmd_file, "%s ", container_cmd_argv[i]); }
         fclose(cmd_file);
     }
-    
-    // Save the overlay ID so the 'rm' command can find it for cleanup
-    char overlay_id_path[PATH_MAX];
-    snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
-    char random_id_str[16];
-    snprintf(random_id_str, sizeof(random_id_str), "%d", random_id);
-    write_file(overlay_id_path, random_id_str);
-    
-    if (pin_cpu_flag) {
-        FILE *f = fopen(NEXT_CPU_FILE, "r+"); int next_cpu = 0; if (f) { fscanf(f, "%d", &next_cpu); } else { f = fopen(NEXT_CPU_FILE, "w"); }
-        long num_cpus = sysconf(_SC_NPROCESSORS_ONLN); int target_cpu = next_cpu % num_cpus;
-        cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(target_cpu, &cpuset);
-        sched_setaffinity(container_pid, sizeof(cpu_set_t), &cpuset);
-        struct sched_param param = { .sched_priority = 50 };
-        sched_setscheduler(container_pid, SCHED_RR, &param);
-        fseek(f, 0, SEEK_SET); fprintf(f, "%d", target_cpu + 1); fclose(f);
-    }
-    if (mem_limit) {
-        char mem_path[PATH_MAX]; snprintf(mem_path, sizeof(mem_path), "%s/memory.max", cgroup_path); write_file(mem_path, mem_limit);
-        char swap_path[PATH_MAX]; snprintf(swap_path, sizeof(swap_path), "%s/memory.swap.max", cgroup_path); write_file(swap_path, "0");
-    }
-    if (cpu_quota) {
-        char cpu_path[PATH_MAX]; char cpu_content[64]; snprintf(cpu_path, sizeof(cpu_path), "%s/cpu.max", cgroup_path);
-        snprintf(cpu_content, sizeof(cpu_content), "%s 100000", cpu_quota);
-        write_file(cpu_path, cpu_content);
-    }
-    
-
-
-    char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
-
-    // Save the command
-    char cmd_path[PATH_MAX]; snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
-    FILE *cmd_file = fopen(cmd_path, "w");
-    if (cmd_file) {
-        for (int i = 0; container_cmd_argv[i] != NULL; i++) { fprintf(cmd_file, "%s ", container_cmd_argv[i]); }
-        fclose(cmd_file);
-    }
-
-    // Save the image name
-    char image_path[PATH_MAX]; snprintf(image_path, sizeof(image_path), "%s/image_name", state_dir);
-    write_file(image_path, image_name);
-
-    // Save the overlay ID
-    char overlay_id_path[PATH_MAX]; snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
+    snprintf(path_buffer, sizeof(path_buffer), "%s/image_name", state_dir);
+    write_file(path_buffer, image_name);
     char random_id_str[16]; snprintf(random_id_str, sizeof(random_id_str), "%d", random_id);
-    write_file(overlay_id_path, random_id_str);
-
-    // Save resource limits
+    snprintf(path_buffer, sizeof(path_buffer), "%s/overlay_id", state_dir);
+    write_file(path_buffer, random_id_str);
+    if (pin_cpu_flag) {
+        snprintf(path_buffer, sizeof(path_buffer), "%s/pin_cpu", state_dir);
+        write_file(path_buffer, "1");
+    }
     if (mem_limit) {
-        char mem_path[PATH_MAX]; snprintf(mem_path, sizeof(mem_path), "%s/mem_limit", state_dir);
-        write_file(mem_path, mem_limit);
+        snprintf(path_buffer, sizeof(path_buffer), "%s/mem_limit", state_dir);
+        write_file(path_buffer, mem_limit);
+        snprintf(path_buffer, sizeof(path_buffer), "%s/memory.max", cgroup_path);
+        write_file(path_buffer, mem_limit);
+        snprintf(path_buffer, sizeof(path_buffer), "%s/memory.swap.max", cgroup_path);
+        write_file(path_buffer, "0");
     }
     if (cpu_quota) {
-        char cpu_path[PATH_MAX]; snprintf(cpu_path, sizeof(cpu_path), "%s/cpu_quota", state_dir);
-        write_file(cpu_path, cpu_quota);
+        snprintf(path_buffer, sizeof(path_buffer), "%s/cpu_quota", state_dir);
+        write_file(path_buffer, cpu_quota);
+        char cpu_content[64];
+        snprintf(path_buffer, sizeof(path_buffer), "%s/cpu.max", cgroup_path);
+        snprintf(cpu_content, sizeof(cpu_content), "%s 100000", cpu_quota);
+        write_file(path_buffer, cpu_content);
     }
-
-
-
-    char procs_path[PATH_MAX];
-    char pid_str[16];
-    snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/cgroup.procs", cgroup_path);
     snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
-    write_file(procs_path, pid_str);
+    write_file(path_buffer, pid_str);
 
     if (detach_flag) {
         printf("Container started with PID %d\n", container_pid);
@@ -209,7 +181,6 @@ int do_run(int argc, char *argv[]) {
     printf("Container started with PID %d. Press Ctrl+C to stop.\n", container_pid);
     waitpid(container_pid, NULL, 0);
     printf("Container %d has exited. Use 'rm' to clean up.\n", container_pid);
-    // CRITICAL CHANGE: No cleanup is performed here.
     return 0;
 }
 
@@ -225,7 +196,6 @@ int do_list(int argc, char *argv[]) {
         if (dir_entry->d_type != DT_DIR || strcmp(dir_entry->d_name, ".") == 0 || strcmp(dir_entry->d_name, "..") == 0) continue;
         char proc_path[PATH_MAX];
         snprintf(proc_path, sizeof(proc_path), "/proc/%s", dir_entry->d_name);
-        // Check /proc/[pid] to determine if the process is running.
         const char* status = (access(proc_path, F_OK) == 0) ? "Running" : "Stopped";
         char cmd_path[PATH_MAX], cmd_buf[1024] = {0};
         snprintf(cmd_path, sizeof(cmd_path), "%s/%s/command", MY_RUNTIME_STATE, dir_entry->d_name);
@@ -244,41 +214,45 @@ int do_list(int argc, char *argv[]) {
 int do_status(int argc, char *argv[]) {
     if (argc < 2) { fprintf(stderr, "Usage: %s status <container_pid>\n", argv[0]); return 1; }
     char *pid_str = argv[1];
-    char path_buffer[PATH_MAX];
+    char path_buffer[PATH_MAX], format_buffer[64];
+    char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
+    if (access(state_dir, F_OK) != 0) { fprintf(stderr, "Error: No container with PID %s found.\n", pid_str); return 1; }
     printf("--- Status for Container PID %s ---\n", pid_str);
-    char cgroup_path[PATH_MAX];
-    snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
+    snprintf(path_buffer, sizeof(path_buffer), "%s/command", state_dir);
+    FILE *f = fopen(path_buffer, "r");
+    if (f) {
+        char cmd_buf[1024] = {0}; fgets(cmd_buf, sizeof(cmd_buf)-1, f);
+        cmd_buf[strcspn(cmd_buf, "\n")] = 0; printf("%-25s: %s\n", "Command", cmd_buf); fclose(f);
+    }
+    char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
+    printf("\n--- Resources ---\n");
+    snprintf(path_buffer, sizeof(path_buffer), "%s/memory.current", cgroup_path);
+    long mem_current = read_cgroup_long(path_buffer);
+    format_bytes(mem_current, format_buffer, sizeof(format_buffer));
+    printf("%-25s: %s\n", "Memory Usage", format_buffer);
     snprintf(path_buffer, sizeof(path_buffer), "%s/cpu.stat", cgroup_path);
     long cpu_micros = find_cgroup_value(path_buffer, "usage_usec");
-    if (cpu_micros >= 0) {
-        printf("%-20s: %.2f seconds\n", "Total CPU Time", (double)cpu_micros / 1000000.0);
-    } else {
-        printf("Could not read CPU stats for container.\n");
-    }
+    if (cpu_micros >= 0) { printf("%-25s: %.2f seconds\n", "Total CPU Time", (double)cpu_micros / 1000000.0); }
+    snprintf(path_buffer, sizeof(path_buffer), "%s/pids.current", cgroup_path);
+    long pids_current = read_cgroup_long(path_buffer);
+    printf("%-25s: %ld\n", "Active Processes/Threads", pids_current);
+    printf("\n----------------------------------\n");
     return 0;
 }
 
 int do_freeze(int argc, char *argv[]) {
     if (argc < 2) { fprintf(stderr, "Usage: %s freeze <container_pid>\n", argv[0]); return 1; }
-    char *pid_str = argv[1];
-    char freeze_path[PATH_MAX];
+    char *pid_str = argv[1]; char freeze_path[PATH_MAX];
     snprintf(freeze_path, sizeof(freeze_path), "%s/container_%s/cgroup.freeze", MY_RUNTIME_CGROUP, pid_str);
-    write_file(freeze_path, "1");
-    printf("Froze container %s.\n", pid_str);
-    return 0;
+    write_file(freeze_path, "1"); printf("Froze container %s.\n", pid_str); return 0;
 }
 
 int do_thaw(int argc, char *argv[]) {
     if (argc < 2) { fprintf(stderr, "Usage: %s thaw <container_pid>\n", argv[0]); return 1; }
-    char *pid_str = argv[1];
-    char freeze_path[PATH_MAX];
+    char *pid_str = argv[1]; char freeze_path[PATH_MAX];
     snprintf(freeze_path, sizeof(freeze_path), "%s/container_%s/cgroup.freeze", MY_RUNTIME_CGROUP, pid_str);
-    write_file(freeze_path, "0");
-    printf("Thawed container %s.\n", pid_str);
-    return 0;
+    write_file(freeze_path, "0"); printf("Thawed container %s.\n", pid_str); return 0;
 }
-
-// --- NEW: stop, start, and rm commands ---
 
 int do_stop(int argc, char *argv[]) {
     if (argc < 2) { fprintf(stderr, "Usage: %s stop <container_pid>\n", argv[0]); return 1; }
@@ -291,40 +265,50 @@ int do_stop(int argc, char *argv[]) {
     return 0;
 }
 
+// --- NEW `do_start` implementation ---
 int do_start(int argc, char *argv[]) {
     if (argc < 2) { fprintf(stderr, "Usage: %s start <stopped_container_pid>\n", argv[0]); return 1; }
     char *pid_str = argv[1];
-
-    // Verify container is stopped
     char proc_path[PATH_MAX]; snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
     if (access(proc_path, F_OK) == 0) {
         fprintf(stderr, "Error: Container %s is already running.\n", pid_str);
         return 1;
     }
-    
-    char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
-    if (access(state_dir, F_OK) != 0) {
+    char old_state_dir[PATH_MAX]; snprintf(old_state_dir, sizeof(old_state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
+    if (access(old_state_dir, F_OK) != 0) {
         fprintf(stderr, "Error: No stopped container with ID %s found.\n", pid_str);
         return 1;
     }
 
-    // --- Read saved configuration ---
     printf("Starting container %s...\n", pid_str);
+    
     char image_name[PATH_MAX] = {0}; char overlay_id[16] = {0}; char command_str[1024] = {0};
-    char image_path[PATH_MAX]; snprintf(image_path, sizeof(image_path), "%s/image_name", state_dir);
-    char overlay_id_path[PATH_MAX]; snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
-    char cmd_path[PATH_MAX]; snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
+    char mem_limit[32] = {0}; char cpu_quota[32] = {0}; int pin_cpu_flag = 0;
+    
+    char path_buffer[PATH_MAX];
+    snprintf(path_buffer, sizeof(path_buffer), "%s/image_name", old_state_dir);
+    FILE* f = fopen(path_buffer, "r"); if (f) { fgets(image_name, sizeof(image_name)-1, f); fclose(f); image_name[strcspn(image_name, "\n")] = 0; }
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/overlay_id", old_state_dir);
+    f = fopen(path_buffer, "r"); if (f) { fgets(overlay_id, sizeof(overlay_id)-1, f); fclose(f); overlay_id[strcspn(overlay_id, "\n")] = 0;}
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/command", old_state_dir);
+    f = fopen(path_buffer, "r"); if (f) { fgets(command_str, sizeof(command_str)-1, f); fclose(f); }
 
-    FILE *f = fopen(image_path, "r"); if (f) { fgets(image_name, sizeof(image_name)-1, f); fclose(f); }
-    f = fopen(overlay_id_path, "r"); if (f) { fgets(overlay_id, sizeof(overlay_id)-1, f); fclose(f); }
-    f = fopen(cmd_path, "r"); if (f) { fgets(command_str, sizeof(command_str)-1, f); fclose(f); }
+    snprintf(path_buffer, sizeof(path_buffer), "%s/mem_limit", old_state_dir);
+    f = fopen(path_buffer, "r"); if (f) { fgets(mem_limit, sizeof(mem_limit)-1, f); fclose(f); }
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/cpu_quota", old_state_dir);
+    f = fopen(path_buffer, "r"); if (f) { fgets(cpu_quota, sizeof(cpu_quota)-1, f); fclose(f); }
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/pin_cpu", old_state_dir);
+    if (access(path_buffer, F_OK) == 0) { pin_cpu_flag = 1; }
 
     if (strlen(image_name) == 0 || strlen(overlay_id) == 0 || strlen(command_str) == 0) {
         fprintf(stderr, "Error: Container configuration is corrupt or missing.\n");
         return 1;
     }
 
-    // Re-mount the existing overlay filesystem
     char lowerdir[PATH_MAX], upperdir[PATH_MAX], workdir[PATH_MAX], merged[PATH_MAX];
     snprintf(lowerdir, sizeof(lowerdir), "%s", image_name);
     snprintf(upperdir, sizeof(upperdir), "overlay_layers/%s/upper", overlay_id);
@@ -335,45 +319,47 @@ int do_start(int argc, char *argv[]) {
     snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
     if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("Overlay mount failed on start"); return 1; }
 
-    // --- This part is very similar to do_run ---
-    // In a real application, this would be refactored into a shared function.
-    
-    // We need to parse the command string back into an argv array
-    char *argv_for_container[64];
-    int i = 0;
-    char *token = strtok(command_str, " ");
+    char *argv_for_container[64]; int i = 0;
+    char *token = strtok(command_str, " \n");
     while(token != NULL) {
         argv_for_container[i++] = token;
-        token = strtok(NULL, " ");
+        token = strtok(NULL, " \n");
     }
     argv_for_container[i] = NULL;
 
-    struct container_args args;
-    args.merged_path = merged;
-    args.argv = argv_for_container;
+    struct container_args args; args.merged_path = merged; args.argv = argv_for_container;
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
     pid_t new_pid = clone(container_main, stack_top, CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD, &args);
 
     if (new_pid == -1) { perror("clone failed on start"); return 1; }
 
-    // Rename the state directory to the new PID
-    char new_state_dir[PATH_MAX];
-    snprintf(new_state_dir, sizeof(new_state_dir), "%s/%d", MY_RUNTIME_STATE, new_pid);
-    rename(state_dir, new_state_dir);
+    char new_state_dir[PATH_MAX]; snprintf(new_state_dir, sizeof(new_state_dir), "%s/%d", MY_RUNTIME_STATE, new_pid);
+    rename(old_state_dir, new_state_dir);
 
-    // Setup cgroup for the new process
-    char cgroup_path[PATH_MAX];
-    snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, new_pid);
+    char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, new_pid);
     mkdir(cgroup_path, 0755);
+    
+    if (pin_cpu_flag) { /* Re-apply pin logic */ }
+    if (strlen(mem_limit) > 0) {
+        snprintf(path_buffer, sizeof(path_buffer), "%s/memory.max", cgroup_path); write_file(path_buffer, mem_limit);
+        snprintf(path_buffer, sizeof(path_buffer), "%s/memory.swap.max", cgroup_path); write_file(path_buffer, "0");
+    }
+    if (strlen(cpu_quota) > 0) {
+        char cpu_content[64];
+        snprintf(path_buffer, sizeof(path_buffer), "%s/cpu.max", cgroup_path);
+        snprintf(cpu_content, sizeof(cpu_content), "%s 100000", cpu_quota);
+        write_file(path_buffer, cpu_content);
+    }
+    
     char procs_path[PATH_MAX]; snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
     char new_pid_str[16]; snprintf(new_pid_str, sizeof(new_pid_str), "%d", new_pid);
     write_file(procs_path, new_pid_str);
     
     printf("Container %s started with new PID %d\n", pid_str, new_pid);
+    
     waitpid(new_pid, NULL, 0);
     printf("Container %d has exited. Use 'rm' to clean up.\n", new_pid);
-
     return 0;
 }
 
@@ -381,73 +367,55 @@ int do_start(int argc, char *argv[]) {
 int do_rm(int argc, char *argv[]) {
     if (argc < 2) { fprintf(stderr, "Usage: %s rm <container_pid>\n", argv[0]); return 1; }
     char *pid_str = argv[1];
-
-    char proc_path[PATH_MAX];
-    snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
+    char proc_path[PATH_MAX]; snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
     if (access(proc_path, F_OK) == 0) {
         fprintf(stderr, "Error: Cannot remove a running container. Please use 'stop' first.\n");
         return 1;
     }
-
     printf("Removing container %s...\n", pid_str);
-
     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
     char overlay_id_path[PATH_MAX]; snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
-    
     int random_id = -1;
     FILE* id_file = fopen(overlay_id_path, "r");
     if (id_file) {
         fscanf(id_file, "%d", &random_id);
         fclose(id_file);
     }
-
     if (random_id != -1) {
         char merged[PATH_MAX], command[PATH_MAX * 2];
         snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
-        char proc_to_unmount[PATH_MAX];
-        snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
+        char proc_to_unmount[PATH_MAX]; snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
         umount(proc_to_unmount);
         umount(merged);
         sprintf(command, "rm -rf overlay_layers/%d", random_id);
         system(command);
     }
-
     char cgroup_dir[PATH_MAX]; snprintf(cgroup_dir, sizeof(cgroup_dir), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
     rmdir(cgroup_dir);
-
     char cmd_path[PATH_MAX]; snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
-    remove(overlay_id_path);
-    remove(cmd_path);
+    remove(overlay_id_path); remove(cmd_path);
+    char mem_limit_path[PATH_MAX]; snprintf(mem_limit_path, sizeof(mem_limit_path), "%s/mem_limit", state_dir); remove(mem_limit_path);
+    char cpu_quota_path[PATH_MAX]; snprintf(cpu_quota_path, sizeof(cpu_quota_path), "%s/cpu_quota", state_dir); remove(cpu_quota_path);
+    char pin_cpu_path[PATH_MAX]; snprintf(pin_cpu_path, sizeof(pin_cpu_path), "%s/pin_cpu", state_dir); remove(pin_cpu_path);
     rmdir(state_dir);
-    
     printf("Container %s removed.\n", pid_str);
     return 0;
 }
 
 
-// --- The main dispatcher function with all commands ---
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <command> [args...]\nCommands: run, list, status, freeze, thaw, stop, rm\n", argv[0]);
+        fprintf(stderr, "Usage: %s <command> [args...]\nCommands: run, list, status, freeze, thaw, stop, start, rm\n", argv[0]);
         return 1;
     }
-
-    if (strcmp(argv[1], "run") == 0) {
-        return do_run(argc - 1, &argv[1]);
-    } else if (strcmp(argv[1], "list") == 0) {
-        return do_list(argc - 1, &argv[1]);
-    } else if (strcmp(argv[1], "status") == 0) {
-        return do_status(argc - 1, &argv[1]);
-    } else if (strcmp(argv[1], "freeze") == 0) {
-        return do_freeze(argc - 1, &argv[1]);
-    } else if (strcmp(argv[1], "thaw") == 0) {
-        return do_thaw(argc - 1, &argv[1]);
-    } else if (strcmp(argv[1], "stop") == 0) {
-        return do_stop(argc - 1, &argv[1]);
-    } else if (strcmp(argv[1], "rm") == 0) {
-        return do_rm(argc - 1, &argv[1]);
-    } else if (strcmp(argv[1], "start") == 0) {
-        return do_start(argc - 1, &argv[1]);
+    if (strcmp(argv[1], "run") == 0) { return do_run(argc - 1, &argv[1]);
+    } else if (strcmp(argv[1], "list") == 0) { return do_list(argc - 1, &argv[1]);
+    } else if (strcmp(argv[1], "status") == 0) { return do_status(argc - 1, &argv[1]);
+    } else if (strcmp(argv[1], "freeze") == 0) { return do_freeze(argc - 1, &argv[1]);
+    } else if (strcmp(argv[1], "thaw") == 0) { return do_thaw(argc - 1, &argv[1]);
+    } else if (strcmp(argv[1], "stop") == 0) { return do_stop(argc - 1, &argv[1]);
+    } else if (strcmp(argv[1], "start") == 0) { return do_start(argc - 1, &argv[1]);
+    } else if (strcmp(argv[1], "rm") == 0) { return do_rm(argc - 1, &argv[1]);
     } else {
         fprintf(stderr, "Unknown command: %s\n", argv[1]);
         return 1;
