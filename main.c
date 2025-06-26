@@ -528,15 +528,12 @@ int do_rm(int argc, char *argv[]) {
     char *pid_str = argv[1];
     char proc_path[PATH_MAX];
     snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
-    // Check if container is still running
     if (access(proc_path, F_OK) == 0) {
         fprintf(stderr, "Error: Cannot remove a running container. Use 'stop' first.\n");
         return 1;
     }
     printf("Removing container %s...\n", pid_str);
-    // Ensure mounts are cleaned up before removal
     cleanup_mounts(atoi(pid_str));
-    // Remove overlay and state directories
     char command[PATH_MAX];
     char state_dir[PATH_MAX];
     snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
@@ -554,6 +551,14 @@ int do_rm(int argc, char *argv[]) {
     }
     snprintf(command, sizeof(command), "rm -rf %s", state_dir);
     system(command);
+    // Remove the cgroup directory
+    char cgroup_dir[PATH_MAX];
+    snprintf(cgroup_dir, sizeof(cgroup_dir), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
+    if (rmdir(cgroup_dir) != 0) {
+        if (errno != ENOENT) {
+            perror("Failed to remove cgroup directory");
+        }
+    }
     printf("Container %s removed.\n", pid_str);
     return 0;
 }
