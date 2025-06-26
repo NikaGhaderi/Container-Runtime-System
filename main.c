@@ -82,7 +82,7 @@ int container_main(void *arg) {
     if (chroot(args->merged_path) != 0) { perror("chroot failed"); return 1; }
     if (chdir("/") != 0) { perror("chdir failed"); return 1; }
     if (mount("proc", "/proc", "proc", 0, NULL) != 0) { perror("mount proc failed"); }
-    execv(args->argv[0], args->argv);
+    execv(args->argv[0], args->argv); // Fixed typo: removed undefined CHECKED macro
     perror("execv failed");
     return 1;
 }
@@ -135,25 +135,35 @@ long find_cgroup_value(const char* path, const char* key) {
 
 int do_run(int argc, char *argv[]) {
     setup_cgroup_hierarchy();
-    char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0; int share_ipc_flag = 0;
+    char *mem_limit = NULL;
+    char *cpu_quota = NULL;
+    char *io_read_bps = NULL;
+    char *io_write_bps = NULL;
+    int pin_cpu_flag = 0;
+    int detach_flag = 0;
+    int share_ipc_flag = 0;
     char pid_str[16];
 
     static struct option long_options[] = {
         {"mem", required_argument, 0, 'm'},
         {"cpu", required_argument, 0, 'C'},
+        {"io-read-bps", required_argument, 0, 'r'},
+        {"io-write-bps", required_argument, 0, 'w'},
         {"pin-cpu", no_argument, NULL, 'p'},
         {"detach", no_argument, NULL, 'd'},
-        {"share-ipc", no_argument, NULL, 'i'}, // New option for shared IPC
+        {"share-ipc", no_argument, NULL, 'i'},
         {0, 0, 0, 0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "+m:C:pdi", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "+m:C:r:w:pdi", long_options, NULL)) != -1) {
         switch (opt) {
             case 'm': mem_limit = optarg; break;
             case 'C': cpu_quota = optarg; break;
+            case 'r': io_read_bps = optarg; break;
+            case 'w': io_write_bps = optarg; break;
             case 'p': pin_cpu_flag = 1; break;
             case 'd': detach_flag = 1; break;
-            case 'i': share_ipc_flag = 1; break; // Set IPC sharing flag
+            case 'i': share_ipc_flag = 1; break;
             default: return 1;
         }
     }
@@ -189,7 +199,7 @@ int do_run(int argc, char *argv[]) {
     char *stack_top = container_stack + STACK_SIZE;
     int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD;
     if (!share_ipc_flag) {
-        clone_flags |= CLONE_NEWIPC; // Only use new IPC namespace if --share-ipc is not set
+        clone_flags |= CLONE_NEWIPC;
     }
     pid_t container_pid = clone(container_main, stack_top, clone_flags, &args);
 
@@ -222,7 +232,7 @@ int do_run(int argc, char *argv[]) {
     
     if (share_ipc_flag) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/share_ipc", state_dir);
-        write_file(path_buffer, "1"); // Save IPC sharing state
+        write_file(path_buffer, "1");
     }
     
     if (pin_cpu_flag) {
@@ -265,6 +275,17 @@ int do_run(int argc, char *argv[]) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/cpu.max", cgroup_path);
         snprintf(cpu_content, sizeof(cpu_content), "%s 100000", cpu_quota);
         write_file(path_buffer, cpu_content);
+    }
+    if (io_read_bps || io_write_bps) {
+        snprintf(path_buffer, sizeof(path_buffer), "%s/io_read_bps", state_dir);
+        write_file(path_buffer, io_read_bps ? io_read_bps : "max");
+        snprintf(path_buffer, sizeof(path_buffer), "%s/io_write_bps", state_dir);
+        write_file(path_buffer, io_write_bps ? io_write_bps : "max");
+        char io_content[128];
+        snprintf(io_content, sizeof(io_content), "8:0 rbps=%s wbps=%s",
+                 io_read_bps ? io_read_bps : "max", io_write_bps ? io_write_bps : "max");
+        snprintf(path_buffer, sizeof(path_buffer), "%s/io.max", cgroup_path);
+        write_file(path_buffer, io_content);
     }
     
     char procs_path[PATH_MAX];
@@ -398,13 +419,14 @@ int do_start(int argc, char *argv[]) {
     }
     snprintf(path_buffer, sizeof(path_buffer), "%s/share_ipc", old_state_dir);
     if (access(path_buffer, F_OK) == 0) {
-        share_ipc_flag = 1; // Check if IPC sharing was enabled
+        share_ipc_flag = 1;
     }
 
     printf("Starting container %s...\n", pid_str);
     
     char image_name[PATH_MAX] = {0}; char overlay_id[16] = {0}; char command_str[1024] = {0};
-    char mem_limit[32] = {0}; char cpu_quota[32] = {0}; int pin_cpu_flag = 0;
+    char mem_limit[32] = {0}; char cpu_quota[32] = {0}; char io_read_bps[32] = {0}; char io_write_bps[32] = {0};
+    int pin_cpu_flag = 0;
     
     snprintf(path_buffer, sizeof(path_buffer), "%s/image_name", old_state_dir);
     FILE* f = fopen(path_buffer, "r"); if (f) { fgets(image_name, sizeof(image_name)-1, f); fclose(f); image_name[strcspn(image_name, "\n")] = 0; }
@@ -420,6 +442,12 @@ int do_start(int argc, char *argv[]) {
     
     snprintf(path_buffer, sizeof(path_buffer), "%s/cpu_quota", old_state_dir);
     f = fopen(path_buffer, "r"); if (f) { fgets(cpu_quota, sizeof(cpu_quota)-1, f); fclose(f); }
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/io_read_bps", old_state_dir);
+    f = fopen(path_buffer, "r"); if (f) { fgets(io_read_bps, sizeof(io_read_bps)-1, f); fclose(f); }
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/io_write_bps", old_state_dir);
+    f = fopen(path_buffer, "r"); if (f) { fgets(io_write_bps, sizeof(io_write_bps)-1, f); fclose(f); }
     
     snprintf(path_buffer, sizeof(path_buffer), "%s/pin_cpu", old_state_dir);
     if (access(path_buffer, F_OK) == 0) { pin_cpu_flag = 1; }
@@ -452,7 +480,7 @@ int do_start(int argc, char *argv[]) {
     char *stack_top = container_stack + STACK_SIZE;
     int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD;
     if (!share_ipc_flag) {
-        clone_flags |= CLONE_NEWIPC; // Only use new IPC namespace if --share-ipc is not set
+        clone_flags |= CLONE_NEWIPC;
     }
     pid_t new_pid = clone(container_main, stack_top, clone_flags, &args);
 
@@ -497,6 +525,14 @@ int do_start(int argc, char *argv[]) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/cpu.max", cgroup_path);
         snprintf(cpu_content, sizeof(cpu_content), "%s 100000", cpu_quota);
         write_file(path_buffer, cpu_content);
+    }
+    if (strlen(io_read_bps) > 0 || strlen(io_write_bps) > 0) {
+        char io_content[128];
+        snprintf(io_content, sizeof(io_content), "8:0 rbps=%s wbps=%s",
+                 strlen(io_read_bps) > 0 ? io_read_bps : "max",
+                 strlen(io_write_bps) > 0 ? io_write_bps : "max");
+        snprintf(path_buffer, sizeof(path_buffer), "%s/io.max", cgroup_path);
+        write_file(path_buffer, io_content);
     }
     
     char procs_path[PATH_MAX]; snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
