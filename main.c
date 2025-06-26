@@ -113,6 +113,8 @@ int do_run(int argc, char *argv[]) {
     snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
     if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("Overlay mount failed"); return 1; }
 
+
+
     struct container_args args;
     args.merged_path = merged;
     args.argv = container_cmd_argv;
@@ -160,6 +162,39 @@ int do_run(int argc, char *argv[]) {
         write_file(cpu_path, cpu_content);
     }
     
+
+
+    char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
+    
+    // Save the command
+    char cmd_path[PATH_MAX]; snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
+    FILE *cmd_file = fopen(cmd_path, "w");
+    if (cmd_file) {
+        for (int i = 0; container_cmd_argv[i] != NULL; i++) { fprintf(cmd_file, "%s ", container_cmd_argv[i]); }
+        fclose(cmd_file);
+    }
+
+    // Save the image name
+    char image_path[PATH_MAX]; snprintf(image_path, sizeof(image_path), "%s/image_name", state_dir);
+    write_file(image_path, image_name);
+    
+    // Save the overlay ID
+    char overlay_id_path[PATH_MAX]; snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
+    char random_id_str[16]; snprintf(random_id_str, sizeof(random_id_str), "%d", random_id);
+    write_file(overlay_id_path, random_id_str);
+
+    // Save resource limits
+    if (mem_limit) {
+        char mem_path[PATH_MAX]; snprintf(mem_path, sizeof(mem_path), "%s/mem_limit", state_dir);
+        write_file(mem_path, mem_limit);
+    }
+    if (cpu_quota) {
+        char cpu_path[PATH_MAX]; snprintf(cpu_path, sizeof(cpu_path), "%s/cpu_quota", state_dir);
+        write_file(cpu_path, cpu_quota);
+    }
+
+
+
     char procs_path[PATH_MAX];
     char pid_str[16];
     snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
@@ -257,10 +292,91 @@ int do_stop(int argc, char *argv[]) {
 }
 
 int do_start(int argc, char *argv[]) {
-    fprintf(stderr, "Error: The 'start' command is a complex feature and is not implemented.\n");
-    fprintf(stderr, "To restart a container, please use 'rm' and then 'run' again.\n");
-    return 1;
+    if (argc < 2) { fprintf(stderr, "Usage: %s start <stopped_container_pid>\n", argv[0]); return 1; }
+    char *pid_str = argv[1];
+
+    // Verify container is stopped
+    char proc_path[PATH_MAX]; snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
+    if (access(proc_path, F_OK) == 0) {
+        fprintf(stderr, "Error: Container %s is already running.\n", pid_str);
+        return 1;
+    }
+    
+    char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
+    if (access(state_dir, F_OK) != 0) {
+        fprintf(stderr, "Error: No stopped container with ID %s found.\n", pid_str);
+        return 1;
+    }
+
+    // --- Read saved configuration ---
+    printf("Starting container %s...\n", pid_str);
+    char image_name[PATH_MAX] = {0}; char overlay_id[16] = {0}; char command_str[1024] = {0};
+    char image_path[PATH_MAX]; snprintf(image_path, sizeof(image_path), "%s/image_name", state_dir);
+    char overlay_id_path[PATH_MAX]; snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
+    char cmd_path[PATH_MAX]; snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
+
+    FILE *f = fopen(image_path, "r"); if (f) { fgets(image_name, sizeof(image_name)-1, f); fclose(f); }
+    f = fopen(overlay_id_path, "r"); if (f) { fgets(overlay_id, sizeof(overlay_id)-1, f); fclose(f); }
+    f = fopen(cmd_path, "r"); if (f) { fgets(command_str, sizeof(command_str)-1, f); fclose(f); }
+
+    if (strlen(image_name) == 0 || strlen(overlay_id) == 0 || strlen(command_str) == 0) {
+        fprintf(stderr, "Error: Container configuration is corrupt or missing.\n");
+        return 1;
+    }
+
+    // Re-mount the existing overlay filesystem
+    char lowerdir[PATH_MAX], upperdir[PATH_MAX], workdir[PATH_MAX], merged[PATH_MAX];
+    snprintf(lowerdir, sizeof(lowerdir), "%s", image_name);
+    snprintf(upperdir, sizeof(upperdir), "overlay_layers/%s/upper", overlay_id);
+    snprintf(workdir, sizeof(workdir), "overlay_layers/%s/work", overlay_id);
+    snprintf(merged, sizeof(merged), "overlay_layers/%s/merged", overlay_id);
+    
+    char mount_opts[PATH_MAX * 3];
+    snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
+    if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("Overlay mount failed on start"); return 1; }
+
+    // --- This part is very similar to do_run ---
+    // In a real application, this would be refactored into a shared function.
+    
+    // We need to parse the command string back into an argv array
+    char *argv_for_container[64];
+    int i = 0;
+    char *token = strtok(command_str, " ");
+    while(token != NULL) {
+        argv_for_container[i++] = token;
+        token = strtok(NULL, " ");
+    }
+    argv_for_container[i] = NULL;
+
+    struct container_args args;
+    args.merged_path = merged;
+    args.argv = argv_for_container;
+    char *container_stack = malloc(STACK_SIZE);
+    char *stack_top = container_stack + STACK_SIZE;
+    pid_t new_pid = clone(container_main, stack_top, CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD, &args);
+
+    if (new_pid == -1) { perror("clone failed on start"); return 1; }
+
+    // Rename the state directory to the new PID
+    char new_state_dir[PATH_MAX];
+    snprintf(new_state_dir, sizeof(new_state_dir), "%s/%d", MY_RUNTIME_STATE, new_pid);
+    rename(state_dir, new_state_dir);
+
+    // Setup cgroup for the new process
+    char cgroup_path[PATH_MAX];
+    snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, new_pid);
+    mkdir(cgroup_path, 0755);
+    char procs_path[PATH_MAX]; snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
+    char new_pid_str[16]; snprintf(new_pid_str, sizeof(new_pid_str), "%d", new_pid);
+    write_file(procs_path, new_pid_str);
+    
+    printf("Container %s started with new PID %d\n", pid_str, new_pid);
+    waitpid(new_pid, NULL, 0);
+    printf("Container %d has exited. Use 'rm' to clean up.\n", new_pid);
+
+    return 0;
 }
+
 
 int do_rm(int argc, char *argv[]) {
     if (argc < 2) { fprintf(stderr, "Usage: %s rm <container_pid>\n", argv[0]); return 1; }
