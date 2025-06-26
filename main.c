@@ -214,13 +214,27 @@ int do_run(int argc, char *argv[]) {
     if (pin_cpu_flag) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/pin_cpu", state_dir);
         write_file(path_buffer, "1");
-        FILE *f = fopen(NEXT_CPU_FILE, "r+"); int next_cpu = 0; if (f) { fscanf(f, "%d", &next_cpu); } else { f = fopen(NEXT_CPU_FILE, "w"); }
-        long num_cpus = sysconf(_SC_NPROCESSORS_ONLN); int target_cpu = next_cpu % num_cpus;
-        cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(target_cpu, &cpuset);
-        sched_setaffinity(container_pid, sizeof(cpu_set_t), &cpuset);
+        FILE *f = fopen(NEXT_CPU_FILE, "r+"); 
+        int next_cpu = 0; 
+        if (f) { fscanf(f, "%d", &next_cpu); } 
+        else { f = fopen(NEXT_CPU_FILE, "w"); }
+        long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+        int target_cpu = next_cpu % num_cpus;
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(target_cpu, &cpuset);
+        if (sched_setaffinity(container_pid, sizeof(cpu_set_t), &cpuset) != 0) {
+            perror("sched_setaffinity failed");
+            return 1;
+        }
         struct sched_param param = { .sched_priority = 50 };
-        sched_setscheduler(container_pid, SCHED_RR, &param);
-        fseek(f, 0, SEEK_SET); fprintf(f, "%d", target_cpu + 1); fclose(f);
+        if (sched_setscheduler(container_pid, SCHED_RR, &param) != 0) {
+            perror("sched_setscheduler failed");
+            return 1;
+        }
+        fseek(f, 0, SEEK_SET);
+        fprintf(f, "%d", (next_cpu + 1) % num_cpus); // Corrected to cycle through CPUs
+        fclose(f);
     }
     if (mem_limit) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/mem_limit", state_dir);
@@ -254,6 +268,7 @@ int do_run(int argc, char *argv[]) {
     printf("Container %d has exited. Use 'rm' to clean up.\n", container_pid);
     return 0;
 }
+
 
 int do_list(int argc, char *argv[]) {
     DIR *d = opendir(MY_RUNTIME_STATE);
@@ -427,13 +442,27 @@ int do_start(int argc, char *argv[]) {
     mkdir(cgroup_path, 0755);
     
     if (pin_cpu_flag) {
-        FILE *f_cpu = fopen(NEXT_CPU_FILE, "r+"); int next_cpu = 0; if (f_cpu) { fscanf(f_cpu, "%d", &next_cpu); } else { f_cpu = fopen(NEXT_CPU_FILE, "w"); }
-        long num_cpus = sysconf(_SC_NPROCESSORS_ONLN); int target_cpu = next_cpu % num_cpus;
-        cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(target_cpu, &cpuset);
-        sched_setaffinity(new_pid, sizeof(cpu_set_t), &cpuset);
+        FILE *f_cpu = fopen(NEXT_CPU_FILE, "r+"); 
+        int next_cpu = 0; 
+        if (f_cpu) { fscanf(f_cpu, "%d", &next_cpu); } 
+        else { f_cpu = fopen(NEXT_CPU_FILE, "w"); }
+        long num_cpus = sysconf(_SC_NPROCESSORS_ONLN); 
+        int target_cpu = next_cpu % num_cpus;
+        cpu_set_t cpuset; 
+        CPU_ZERO(&cpuset); 
+        CPU_SET(target_cpu, &cpuset);
+        if (sched_setaffinity(new_pid, sizeof(cpu_set_t), &cpuset) != 0) {
+            perror("sched_setaffinity failed");
+            return 1;
+        }
         struct sched_param param = { .sched_priority = 50 };
-        sched_setscheduler(new_pid, SCHED_RR, &param);
-        fseek(f_cpu, 0, SEEK_SET); fprintf(f_cpu, "%d", target_cpu + 1); fclose(f_cpu);
+        if (sched_setscheduler(new_pid, SCHED_RR, &param) != 0) {
+            perror("sched_setscheduler failed");
+            return 1;
+        }
+        fseek(f_cpu, 0, SEEK_SET); 
+        fprintf(f_cpu, "%d", (next_cpu + 1) % num_cpus); // Corrected to cycle through CPUs
+        fclose(f_cpu);
     }
     if (strlen(mem_limit) > 0) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/memory.max", cgroup_path); write_file(path_buffer, mem_limit);
@@ -459,7 +488,6 @@ int do_start(int argc, char *argv[]) {
         printf("Container %d has exited. Use 'rm' to clean up.\n", new_pid);
     }
 
-    // --- NEW: Cleanup mounts after start finishes ---
     char proc_to_unmount[PATH_MAX];
     snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
     umount(proc_to_unmount);
@@ -467,7 +495,6 @@ int do_start(int argc, char *argv[]) {
 
     return 0;
 }
-
 int do_rm(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s rm <container_pid>\n", argv[0]);
