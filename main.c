@@ -36,13 +36,19 @@ void cleanup_mounts(int pid) {
         snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
         char proc_to_unmount[PATH_MAX];
         snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
+        
         // Unmount /proc with lazy detach
         if (umount2(proc_to_unmount, MNT_DETACH) != 0) {
-            perror("umount2 proc failed");
+            if (errno != ENOENT && errno != EINVAL) {
+                perror("umount2 proc failed");
+            }
         }
+        
         // Unmount overlay with lazy detach
         if (umount2(merged, MNT_DETACH) != 0) {
-            perror("umount2 overlay failed");
+            if (errno != ENOENT && errno != EINVAL) {
+                perror("umount2 overlay failed");
+            }
         }
     }
 }
