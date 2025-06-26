@@ -21,7 +21,6 @@ if [ -d "$LEGACY_ROOTFS" ]; then
     done
 fi
 
-
 # --- Part 2: Base Image Creation ---
 # This part will still only run if the image is missing.
 
@@ -44,16 +43,67 @@ COMMANDS=(
 # Create the basic directory structure for the image
 mkdir -p "${IMAGE_DIR}"/{bin,lib,lib64,usr/bin,proc,tmp}
 
+# Compile shm_writer and shm_reader if not already compiled
+if [ ! -f "shm_writer" ] || [ ! -f "shm_reader" ]; then
+    echo "--> Compiling shm_writer and shm_reader..."
+    cat > shm_writer.c << 'EOF'
+#include <sys/shm.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#define SHM_KEY 1234
+#define SHM_SIZE 1024
+int main() {
+    int shmid = shmget(SHM_KEY, SHM_SIZE, IPC_CREAT | 0666);
+    if (shmid == -1) { perror("shmget"); return 1; }
+    char *data = shmat(shmid, NULL, 0);
+    if (data == (char *)-1) { perror("shmat"); return 1; }
+    strcpy(data, "Hello from writer!");
+    printf("Wrote to shared memory: %s\n", data);
+    sleep(10); // Wait for reader
+    shmdt(data);
+    return 0;
+}
+EOF
+    cat > shm_reader.c << 'EOF'
+#include <sys/shm.h>
+#include <stdio.h>
+#include <unistd.h>
+int main() {
+    int shmid = shmget(1234, 1024, 0666);
+    if (shmid == -1) { perror("shmget"); return 1; }
+    char *data = shmat(shmid, NULL, 0);
+    if (data == (char *)-1) { perror("shmat"); return 1; }
+    printf("Read from shared memory: %s\n", data);
+    shmdt(data);
+    shmctl(shmid, IPC_RMID, NULL); // Clean up
+    return 0;
+}
+EOF
+    gcc -o shm_writer shm_writer.c
+    gcc -o shm_reader shm_reader.c
+fi
+
 copy_binary_with_deps() {
     local binary_path="$1"
-    if [ ! -f "$binary_path" ]; then
-        echo "--> WARNING: Command not found on host: $binary_path"
+    local source_path="$binary_path"
+    # If the binary is shm_writer or shm_reader, use the locally compiled version
+    if [ "$binary_path" = "shm_writer" ] || [ "$binary_path" = "shm_reader" ]; then
+        source_path="./$binary_path"
+    fi
+    if [ ! -f "$source_path" ]; then
+        echo "--> WARNING: Command not found: $source_path"
         return
     fi
-    local dest_binary="${IMAGE_DIR}${binary_path}"
+    local dest_binary="${IMAGE_DIR}/usr/bin/$binary_path"
+    if [ "$binary_path" = "shm_writer" ] || [ "$binary_path" = "shm_reader" ]; then
+        dest_binary="${IMAGE_IMAGE_DIR}/usr/bin/$binary_path"
+    else
+        dest_binary="${IMAGE_DIR}${binary_path}"
+    fi
     mkdir -p "$(dirname "$dest_binary")"
-    cp "$binary_path" "$dest_binary"
-    for lib in $(ldd "$binary_path" | awk 'NF == 4 {print $3}; NF == 2 {print $1}'); do
+    cp "$source_path" "$dest_binary"
+    for lib in $(ldd "$source_path" | awk 'NF == 4 {print $3}; NF == 2 {print $1}' | grep -v "not a dynamic executable"); do
         if [ ! -f "$lib" ]; then continue; fi
         local dest_lib="${IMAGE_DIR}${lib}"
         if [ ! -f "$dest_lib" ]; then
@@ -63,8 +113,13 @@ copy_binary_with_deps() {
     done
 }
 
+# Copy standard commands
 for cmd in "${COMMANDS[@]}"; do
     copy_binary_with_deps "$cmd"
 done
+
+# Copy shm_writer and shm_reader
+copy_binary_with_deps "shm_writer"
+copy_binary_with_deps "shm_reader"
 
 echo "--> Base image setup complete."
