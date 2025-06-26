@@ -102,6 +102,7 @@ long find_cgroup_value(const char* path, const char* key) {
 int do_run(int argc, char *argv[]) {
     setup_cgroup_hierarchy();
     char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0;
+    char pid_str[16]; // Declaration moved to top of function
 
     static struct option long_options[] = {
         {"mem", required_argument, 0, 'm'}, {"cpu", required_argument, 0, 'C'},
