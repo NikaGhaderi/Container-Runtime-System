@@ -22,7 +22,11 @@
 // --- Helper Functions ---
 void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
-    if (f == NULL) { return; }
+    if (f == NULL) {
+        fprintf(stderr, "ERROR: Failed to open %s for writing: ", path);
+        perror("");
+        return;
+    }
     fprintf(f, "%s", content);
     fclose(f);
 }
@@ -48,7 +52,6 @@ int container_main(void *arg) {
     perror("execv failed");
     return 1;
 }
-
 
 long read_cgroup_long(const char *path) {
     long value = -1;
@@ -99,7 +102,7 @@ long find_cgroup_value(const char* path, const char* key) {
 int do_run(int argc, char *argv[]) {
     setup_cgroup_hierarchy();
     char *mem_limit = NULL; char *cpu_quota = NULL; int pin_cpu_flag = 0; int detach_flag = 0;
-    char pid_str[16]; // Declaration moved to top of function
+    char pid_str[16];
 
     static struct option long_options[] = {
         {"mem", required_argument, 0, 'm'}, {"cpu", required_argument, 0, 'C'},
@@ -409,7 +412,7 @@ int do_rm(int argc, char *argv[]) {
         return 1;
     }
     printf("Removing container %s...\n", pid_str);
-
+    
     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
     char overlay_id_path[PATH_MAX]; snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
     int random_id = -1;
@@ -444,7 +447,6 @@ int do_rm(int argc, char *argv[]) {
     printf("Container %s removed.\n", pid_str);
     return 0;
 }
-
 
 
 int main(int argc, char *argv[]) {
