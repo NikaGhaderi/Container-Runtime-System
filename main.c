@@ -165,7 +165,7 @@ int do_run(int argc, char *argv[]) {
 
 
     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
-    
+
     // Save the command
     char cmd_path[PATH_MAX]; snprintf(cmd_path, sizeof(cmd_path), "%s/command", state_dir);
     FILE *cmd_file = fopen(cmd_path, "w");
@@ -177,7 +177,7 @@ int do_run(int argc, char *argv[]) {
     // Save the image name
     char image_path[PATH_MAX]; snprintf(image_path, sizeof(image_path), "%s/image_name", state_dir);
     write_file(image_path, image_name);
-    
+
     // Save the overlay ID
     char overlay_id_path[PATH_MAX]; snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
     char random_id_str[16]; snprintf(random_id_str, sizeof(random_id_str), "%d", random_id);
