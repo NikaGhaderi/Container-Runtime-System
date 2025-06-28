@@ -13,6 +13,7 @@
 #include <getopt.h>
 #include <dirent.h>
 #include <time.h>
+#include <libgen.h>
 
 #define STACK_SIZE (1024 * 1024)
 #define MY_RUNTIME_CGROUP "/sys/fs/cgroup/my_runtime"
@@ -66,6 +67,25 @@ void cleanup_mounts(int pid) {
             }
         }
     }
+}
+
+int mkdir_p(const char *path, mode_t mode) {
+    char *p = strdup(path);
+    if (!p) return -1;
+    char *slash = p;
+    while (*slash) {
+        if (*slash == '/') {
+            *slash = '\0';
+            if (mkdir(p, mode) != 0 && errno != EEXIST) {
+                free(p);
+                return -1;
+            }
+            *slash = '/';
+        }
+        slash++;
+    }
+    free(p);
+    return mkdir(path, mode) == 0 || errno == EEXIST ? 0 : -1;
 }
 
 void write_file(const char *path, const char *content) {
@@ -349,14 +369,17 @@ int do_share_mount(int argc, char *argv[]) {
         }
         pclose(blkid);
     }
-
+    printf("Detected fiesystem type: '%s'\n", fs_type);
     // Try mounting with detected or common filesystem types
     const char *fs_types[] = {fs_type, "ext4", "vfat", "xfs", "ntfs", NULL};
     int mounted = 0;
     for (int i = 0; fs_types[i]; i++) {
+        printf("Trying to mount %s on %s with type %s\n", device, host_mount_point, fs_types[i]);
         if (mount(device, host_mount_point, fs_types[i], MS_SHARED, NULL) == 0) {
             mounted = 1;
             break;
+        } else {
+            perror("Mount failed");
         }
     }
     if (!mounted) {
