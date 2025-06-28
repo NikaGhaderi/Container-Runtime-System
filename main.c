@@ -36,14 +36,33 @@ void cleanup_mounts(int pid) {
         snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
         char proc_to_unmount[PATH_MAX];
         snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
-        
+
         // Unmount /proc with lazy detach
         if (umount2(proc_to_unmount, MNT_DETACH) != 0) {
             if (errno != ENOENT && errno != EINVAL) {
                 perror("umount2 proc failed");
             }
         }
-        
+
+        // ADDED: Unmount the propagated mount if it exists
+        char propagate_mount_path[PATH_MAX];
+        snprintf(propagate_mount_path, sizeof(propagate_mount_path), "%s/propagate_mount_dir", state_dir);
+        FILE* p_file = fopen(propagate_mount_path, "r");
+        if (p_file) {
+            char p_dir[PATH_MAX];
+            if (fgets(p_dir, sizeof(p_dir), p_file)) {
+                 p_dir[strcspn(p_dir, "\n")] = 0; // Remove newline
+                 char container_mount_point[PATH_MAX];
+                 snprintf(container_mount_point, sizeof(container_mount_point), "%s%s", merged, p_dir);
+                 if (umount2(container_mount_point, MNT_DETACH) != 0) {
+                     if (errno != ENOENT && errno != EINVAL) {
+                        perror("umount2 propagated mount failed");
+                     }
+                 }
+            }
+            fclose(p_file);
+        }
+
         // Unmount overlay with lazy detach
         if (umount2(merged, MNT_DETACH) != 0) {
             if (errno != ENOENT && errno != EINVAL) {
@@ -74,10 +93,38 @@ void setup_cgroup_hierarchy() {
 struct container_args {
     char* merged_path;
     char** argv;
+    char* propagate_mount_dir;
 };
+
 
 int container_main(void *arg) {
     struct container_args* args = (struct container_args*)arg;
+
+    // ADDED: Handle propagated mount inside the container
+    if (args->propagate_mount_dir) {
+        char container_mount_path[PATH_MAX];
+        char command[PATH_MAX * 2];
+        
+        // Construct the full path inside the container's rootfs
+        snprintf(container_mount_path, sizeof(container_mount_path), "%s%s", args->merged_path, args->propagate_mount_dir);
+
+        // Create the directory inside the container's rootfs (e.g., /merged/shared_data)
+        // Using system("mkdir -p ...") is a robust way to create parent dirs if they don't exist
+        snprintf(command, sizeof(command), "mkdir -p %s", container_mount_path);
+        if (system(command) != 0) {
+            perror("mkdir -p for propagated mount failed");
+            // Not fatal, we can continue
+        }
+
+        // Bind mount the host directory to the container directory.
+        // Because the host dir was marked MS_SHARED, mount events will propagate.
+        if (mount(args->propagate_mount_dir, container_mount_path, NULL, MS_BIND, NULL) != 0) {
+            perror("bind mount for propagation failed");
+            // Not fatal, we can continue
+        }
+    }
+
+
     sethostname("container", 9);
     if (chroot(args->merged_path) != 0) { perror("chroot failed"); return 1; }
     if (chdir("/") != 0) { perror("chdir failed"); return 1; }
@@ -139,11 +186,13 @@ int do_run(int argc, char *argv[]) {
     char *cpu_quota = NULL;
     char *io_read_bps = NULL;
     char *io_write_bps = NULL;
+    char *propagate_mount_dir = NULL; // ADDED: Variable for the mount propagation directory
     int pin_cpu_flag = 0;
     int detach_flag = 0;
     int share_ipc_flag = 0;
     char pid_str[16];
 
+    // MODIFIED: Added the new --propagate-mount option
     static struct option long_options[] = {
         {"mem", required_argument, 0, 'm'},
         {"cpu", required_argument, 0, 'C'},
@@ -152,10 +201,11 @@ int do_run(int argc, char *argv[]) {
         {"pin-cpu", no_argument, NULL, 'p'},
         {"detach", no_argument, NULL, 'd'},
         {"share-ipc", no_argument, NULL, 'i'},
+        {"propagate-mount", required_argument, 0, 'M'}, // ADDED
         {0, 0, 0, 0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "+m:C:r:w:pdi", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "+m:C:r:w:pdiM:", long_options, NULL)) != -1) { // MODIFIED
         switch (opt) {
             case 'm': mem_limit = optarg; break;
             case 'C': cpu_quota = optarg; break;
@@ -164,12 +214,25 @@ int do_run(int argc, char *argv[]) {
             case 'p': pin_cpu_flag = 1; break;
             case 'd': detach_flag = 1; break;
             case 'i': share_ipc_flag = 1; break;
+            case 'M': propagate_mount_dir = optarg; break; // ADDED
             default: return 1;
         }
     }
     if (optind + 1 >= argc) { fprintf(stderr, "Usage: %s run [opts] <image> <cmd>...\n", argv[0]); return 1; }
     char* image_name = argv[optind];
     char** container_cmd_argv = &argv[optind + 1];
+
+    // ADDED: Set the host directory mount as shared
+    if (propagate_mount_dir) {
+        // This is crucial. It changes the mount propagation type for the given path to 'shared'.
+        // This means any mounts created under this path on the host will be propagated to peers.
+        if (mount(NULL, propagate_mount_dir, NULL, MS_REC | MS_SHARED, NULL) != 0) {
+            perror("Failed to set mount propagation to SHARED");
+            fprintf(stderr, "Hint: Make sure the directory '%s' exists.\n", propagate_mount_dir);
+            return 1;
+        }
+    }
+
 
     if (detach_flag) {
         if (fork() != 0) { exit(0); }
@@ -187,14 +250,17 @@ int do_run(int argc, char *argv[]) {
     char command[PATH_MAX * 2];
     sprintf(command, "mkdir -p %s %s %s", upperdir, workdir, merged);
     if (system(command) != 0) { return 1; }
-    
+
     char mount_opts[PATH_MAX * 3];
     snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
     if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("Overlay mount failed"); return 1; }
 
+    // MODIFIED: Pass the propagate_mount_dir to the container
     struct container_args args;
     args.merged_path = merged;
     args.argv = container_cmd_argv;
+    args.propagate_mount_dir = propagate_mount_dir; // ADDED
+
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
     int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD;
@@ -204,7 +270,7 @@ int do_run(int argc, char *argv[]) {
     pid_t container_pid = clone(container_main, stack_top, clone_flags, &args);
 
     if (container_pid == -1) { perror("clone"); return 1; }
-    
+
     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
     char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, container_pid);
     if(mkdir(cgroup_path, 0755) != 0 && errno != EEXIST) { perror("Failed to create container cgroup"); }
@@ -216,31 +282,37 @@ int do_run(int argc, char *argv[]) {
         for (int i = 0; container_cmd_argv[i] != NULL; i++) { fprintf(cmd_file, "%s ", container_cmd_argv[i]); }
         fclose(cmd_file);
     }
-    
+
     snprintf(path_buffer, sizeof(path_buffer), "%s/image_name", state_dir);
     write_file(path_buffer, image_name);
-    
+
     char random_id_str[16];
     snprintf(random_id_str, sizeof(random_id_str), "%d", random_id);
     snprintf(path_buffer, sizeof(path_buffer), "%s/overlay_id", state_dir);
     write_file(path_buffer, random_id_str);
-    
+
     if (detach_flag) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/detach", state_dir);
         write_file(path_buffer, "1");
     }
-    
+
     if (share_ipc_flag) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/share_ipc", state_dir);
         write_file(path_buffer, "1");
     }
     
+    // ADDED: Save the propagated mount directory to the state
+    if (propagate_mount_dir) {
+        snprintf(path_buffer, sizeof(path_buffer), "%s/propagate_mount_dir", state_dir);
+        write_file(path_buffer, propagate_mount_dir);
+    }
+
     if (pin_cpu_flag) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/pin_cpu", state_dir);
         write_file(path_buffer, "1");
-        FILE *f = fopen(NEXT_CPU_FILE, "r+"); 
-        int next_cpu = 0; 
-        if (f) { fscanf(f, "%d", &next_cpu); } 
+        FILE *f = fopen(NEXT_CPU_FILE, "r+");
+        int next_cpu = 0;
+        if (f) { fscanf(f, "%d", &next_cpu); }
         else { f = fopen(NEXT_CPU_FILE, "w"); }
         long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
         int target_cpu = next_cpu % num_cpus;
@@ -287,7 +359,7 @@ int do_run(int argc, char *argv[]) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/io.max", cgroup_path);
         write_file(path_buffer, io_content);
     }
-    
+
     char procs_path[PATH_MAX];
     snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
     snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
@@ -346,6 +418,19 @@ int do_status(int argc, char *argv[]) {
         char cmd_buf[1024] = {0}; fgets(cmd_buf, sizeof(cmd_buf)-1, f);
         cmd_buf[strcspn(cmd_buf, "\n")] = 0; printf("%-25s: %s\n", "Command", cmd_buf); fclose(f);
     }
+    
+    // ADDED: Display propagated mount in status
+    snprintf(path_buffer, sizeof(path_buffer), "%s/propagate_mount_dir", state_dir);
+    f = fopen(path_buffer, "r");
+    if (f) {
+        char p_dir[PATH_MAX] = {0};
+        fgets(p_dir, sizeof(p_dir)-1, f);
+        p_dir[strcspn(p_dir, "\n")] = 0;
+        printf("%-25s: %s\n", "Propagated Mount", p_dir);
+        fclose(f);
+    }
+
+
     char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
     printf("\n--- Resources ---\n");
     snprintf(path_buffer, sizeof(path_buffer), "%s/memory.current", cgroup_path);
