@@ -323,6 +323,7 @@ int do_run(int argc, char *argv[]) {
     return 0;
 }
 
+
 int do_share_mount(int argc, char *argv[]) {
     if (argc < 4) {
         fprintf(stderr, "Usage: %s share-mount <device> <host_mount_point> <container_pid>...\n", argv[0]);
@@ -337,12 +338,30 @@ int do_share_mount(int argc, char *argv[]) {
         return 1;
     }
 
-    // Mount the device on the host with MS_SHARED
-    if (mount(device, host_mount_point, "ext4", MS_SHARED, NULL) != 0) {
-        if (mount(device, host_mount_point, "vfat", MS_SHARED, NULL) != 0) {
-            perror("Failed to mount device on host");
-            return 1;
+    // Try to detect filesystem type using blkid
+    char command[PATH_MAX];
+    char fs_type[32] = "ext4"; // Default to ext4
+    snprintf(command, sizeof(command), "blkid -o value -s TYPE %s 2>/dev/null", device);
+    FILE *blkid = popen(command, "r");
+    if (blkid) {
+        if (fgets(fs_type, sizeof(fs_type), blkid)) {
+            fs_type[strcspn(fs_type, "\n")] = 0;
         }
+        pclose(blkid);
+    }
+
+    // Try mounting with detected or common filesystem types
+    const char *fs_types[] = {fs_type, "ext4", "vfat", "xfs", "ntfs", NULL};
+    int mounted = 0;
+    for (int i = 0; fs_types[i]; i++) {
+        if (mount(device, host_mount_point, fs_types[i], MS_SHARED, NULL) == 0) {
+            mounted = 1;
+            break;
+        }
+    }
+    if (!mounted) {
+        perror("Failed to mount device on host");
+        return 1;
     }
 
     // Process each container PID
