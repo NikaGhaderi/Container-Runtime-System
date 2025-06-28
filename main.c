@@ -343,6 +343,34 @@ int do_run(int argc, char *argv[]) {
     return 0;
 }
 
+int mkdir_p(const char *path, mode_t mode) {
+    char *p = strdup(path);
+    if (!p) {
+        perror("Failed to allocate memory for mkdir_p");
+        return -1;
+    }
+    char *slash = p;
+    int created = 0;
+    while (*slash) {
+        if (*slash == '/') {
+            *slash = '\0';
+            if (*p && mkdir(p, mode) != 0 && errno != EEXIST) {
+                fprintf(stderr, "Failed to create directory %s: %s\n", p, strerror(errno));
+                free(p);
+                return -1;
+            }
+            *slash = '/';
+        }
+        slash++;
+    }
+    if (*p && mkdir(p, mode) != 0 && errno != EEXIST) {
+        fprintf(stderr, "Failed to create directory %s: %s\n", p, strerror(errno));
+        free(p);
+        return -1;
+    }
+    free(p);
+    return 0;
+}
 
 int do_share_mount(int argc, char *argv[]) {
     if (argc < 4) {
@@ -352,11 +380,19 @@ int do_share_mount(int argc, char *argv[]) {
     char *device = argv[1];
     char *host_mount_point = argv[2];
     
-    // Ensure host mount point exists
-    if (mkdir(host_mount_point, 0755) != 0 && errno != EEXIST) {
-        perror("Failed to create host mount point");
+    // Verify device exists
+    if (access(device, F_OK) != 0) {
+        fprintf(stderr, "Error: Device %s does not exist: %s\n", device, strerror(errno));
         return 1;
     }
+    printf("Device: %s\n", device);
+
+    // Ensure host mount point exists
+    if (mkdir_p(host_mount_point, 0755) != 0) {
+        fprintf(stderr, "Failed to create host mount point %s: %s\n", host_mount_point, strerror(errno));
+        return 1;
+    }
+    printf("Host mount point: %s\n", host_mount_point);
 
     // Try to detect filesystem type using blkid
     char command[PATH_MAX];
@@ -366,10 +402,15 @@ int do_share_mount(int argc, char *argv[]) {
     if (blkid) {
         if (fgets(fs_type, sizeof(fs_type), blkid)) {
             fs_type[strcspn(fs_type, "\n")] = 0;
+        } else {
+            fprintf(stderr, "Warning: blkid returned no filesystem type, defaulting to ext4\n");
         }
         pclose(blkid);
+    } else {
+        fprintf(stderr, "Warning: Failed to run blkid, defaulting to ext4: %s\n", strerror(errno));
     }
-    printf("Detected fiesystem type: '%s'\n", fs_type);
+    printf("Detected filesystem type: '%s'\n", fs_type);
+
     // Try mounting with detected or common filesystem types
     const char *fs_types[] = {fs_type, "ext4", "vfat", "xfs", "ntfs", NULL};
     int mounted = 0;
@@ -379,13 +420,14 @@ int do_share_mount(int argc, char *argv[]) {
             mounted = 1;
             break;
         } else {
-            perror("Mount failed");
+            fprintf(stderr, "Mount failed for type %s: %s\n", fs_types[i], strerror(errno));
         }
     }
     if (!mounted) {
-        perror("Failed to mount device on host");
+        fprintf(stderr, "Failed to mount device %s on %s\n", device, host_mount_point);
         return 1;
     }
+    printf("Successfully mounted %s on %s\n", device, host_mount_point);
 
     // Process each container PID
     for (int i = 3; i < argc; i++) {
@@ -393,14 +435,14 @@ int do_share_mount(int argc, char *argv[]) {
         char proc_path[PATH_MAX];
         snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
         if (access(proc_path, F_OK) != 0) {
-            fprintf(stderr, "Error: Container %s is not running.\n", pid_str);
+            fprintf(stderr, "Error: Container %s is not running: %s\n", pid_str, strerror(errno));
             continue;
         }
 
         char state_dir[PATH_MAX];
         snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
         if (access(state_dir, F_OK) != 0) {
-            fprintf(stderr, "Error: No container state for PID %s found.\n", pid_str);
+            fprintf(stderr, "Error: No container state for PID %s found: %s\n", pid_str, strerror(errno));
             continue;
         }
 
@@ -409,35 +451,52 @@ int do_share_mount(int argc, char *argv[]) {
         int random_id = -1;
         FILE* id_file = fopen(overlay_id_path, "r");
         if (id_file) {
-            fscanf(id_file, "%d", &random_id);
+            if (fscanf(id_file, "%d", &random_id) != 1) {
+                fprintf(stderr, "Error: Failed to read overlay ID from %s\n", overlay_id_path);
+                fclose(id_file);
+                continue;
+            }
             fclose(id_file);
-        }
-        if (random_id == -1) {
-            fprintf(stderr, "Error: Could not read overlay ID for container %s.\n", pid_str);
+        } else {
+            fprintf(stderr, "Error: Could not open overlay ID file %s: %s\n", overlay_id_path, strerror(errno));
             continue;
         }
+        if (random_id == -1) {
+            fprintf(stderr, "Error: Invalid overlay ID for container %s\n", pid_str);
+            continue;
+        }
+        printf("Overlay ID for container %s: %d\n", pid_str, random_id);
 
         char merged[PATH_MAX];
         snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
-        
-        // Create mount point inside container
-        char container_mount_point[PATH_MAX];
-        snprintf(container_mount_point, sizeof(container_mount_point), "%s%s", merged, host_mount_point);
-        if (mkdir(container_mount_point, 0755) != 0 && errno != EEXIST) {
-            perror("Failed to create container mount point");
+        if (access(merged, F_OK) != 0) {
+            fprintf(stderr, "Error: Merged directory %s does not exist: %s\n", merged, strerror(errno));
             continue;
         }
+        printf("Merged path for container %s: %s\n", pid_str, merged);
+
+        char container_mount_point[PATH_MAX];
+        snprintf(container_mount_point, sizeof(container_mount_point), "%s%s", merged, host_mount_point);
+        printf("Container mount point for container %s: %s\n", pid_str, container_mount_point);
+
+        if (mkdir_p(container_mount_point, 0755) != 0) {
+            fprintf(stderr, "Failed to create container mount point %s: %s\n", container_mount_point, strerror(errno));
+            continue;
+        }
+        printf("Created container mount point %s\n", container_mount_point);
 
         // Bind mount the host mount point to the container
         if (mount(host_mount_point, container_mount_point, NULL, MS_BIND | MS_SLAVE, NULL) != 0) {
-            perror("Failed to bind mount to container");
+            fprintf(stderr, "Failed to bind mount %s to %s: %s\n", host_mount_point, container_mount_point, strerror(errno));
             continue;
         }
+        printf("Bind mount successful for container %s\n", pid_str);
 
         // Store the mount point in state for cleanup
         char shared_mount_path[PATH_MAX];
         snprintf(shared_mount_path, sizeof(shared_mount_path), "%s/shared_mount", state_dir);
         write_file(shared_mount_path, host_mount_point);
+        printf("Stored mount point in %s\n", shared_mount_path);
 
         printf("Shared mount %s added to container %s at %s\n", device, pid_str, container_mount_point);
     }
