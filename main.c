@@ -36,15 +36,30 @@ void cleanup_mounts(int pid) {
         snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
         char proc_to_unmount[PATH_MAX];
         snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
+        char shared_mount_path[PATH_MAX];
+        snprintf(shared_mount_path, sizeof(shared_mount_path), "%s/shared_mount", state_dir);
+        FILE *shared_mount_file = fopen(shared_mount_path, "r");
+        if (shared_mount_file) {
+            char mount_point[PATH_MAX];
+            if (fgets(mount_point, sizeof(mount_point), shared_mount_file)) {
+                mount_point[strcspn(mount_point, "\n")] = 0;
+                char container_mount[PATH_MAX];
+                snprintf(container_mount, sizeof(container_mount), "%s%s", merged, mount_point);
+                if (umount2(container_mount, MNT_DETACH) != 0) {
+                    if (errno != ENOENT && errno != EINVAL) {
+                        perror("umount2 shared mount failed");
+                    }
+                }
+            }
+            fclose(shared_mount_file);
+        }
         
-        // Unmount /proc with lazy detach
         if (umount2(proc_to_unmount, MNT_DETACH) != 0) {
             if (errno != ENOENT && errno != EINVAL) {
                 perror("umount2 proc failed");
             }
         }
         
-        // Unmount overlay with lazy detach
         if (umount2(merged, MNT_DETACH) != 0) {
             if (errno != ENOENT && errno != EINVAL) {
                 perror("umount2 overlay failed");
@@ -52,7 +67,6 @@ void cleanup_mounts(int pid) {
         }
     }
 }
-
 
 void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
@@ -130,7 +144,6 @@ long find_cgroup_value(const char* path, const char* key) {
    return value;
 }
 
-
 // --- CLI Command Functions ---
 
 int do_run(int argc, char *argv[]) {
@@ -191,6 +204,12 @@ int do_run(int argc, char *argv[]) {
     char mount_opts[PATH_MAX * 3];
     snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
     if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("Overlay mount failed"); return 1; }
+
+    // Make the container's root mount point shared to allow propagation
+    if (mount(NULL, merged, NULL, MS_SHARED | MS_REC, NULL) != 0) {
+        perror("Failed to make container root shared");
+        return 1;
+    }
 
     struct container_args args;
     args.merged_path = merged;
@@ -301,6 +320,86 @@ int do_run(int argc, char *argv[]) {
     printf("Container started with PID %d. Press Ctrl+C to stop.\n", container_pid);
     waitpid(container_pid, NULL, 0);
     printf("Container %d has exited. Use 'rm' to clean up.\n", container_pid);
+    return 0;
+}
+
+int do_share_mount(int argc, char *argv[]) {
+    if (argc < 4) {
+        fprintf(stderr, "Usage: %s share-mount <device> <host_mount_point> <container_pid>...\n", argv[0]);
+        return 1;
+    }
+    char *device = argv[1];
+    char *host_mount_point = argv[2];
+    
+    // Ensure host mount point exists
+    if (mkdir(host_mount_point, 0755) != 0 && errno != EEXIST) {
+        perror("Failed to create host mount point");
+        return 1;
+    }
+
+    // Mount the device on the host with MS_SHARED
+    if (mount(device, host_mount_point, "ext4", MS_SHARED, NULL) != 0) {
+        if (mount(device, host_mount_point, "vfat", MS_SHARED, NULL) != 0) {
+            perror("Failed to mount device on host");
+            return 1;
+        }
+    }
+
+    // Process each container PID
+    for (int i = 3; i < argc; i++) {
+        char *pid_str = argv[i];
+        char proc_path[PATH_MAX];
+        snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
+        if (access(proc_path, F_OK) != 0) {
+            fprintf(stderr, "Error: Container %s is not running.\n", pid_str);
+            continue;
+        }
+
+        char state_dir[PATH_MAX];
+        snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
+        if (access(state_dir, F_OK) != 0) {
+            fprintf(stderr, "Error: No container state for PID %s found.\n", pid_str);
+            continue;
+        }
+
+        char overlay_id_path[PATH_MAX];
+        snprintf(overlay_id_path, sizeof(overlay_id_path), "%s/overlay_id", state_dir);
+        int random_id = -1;
+        FILE* id_file = fopen(overlay_id_path, "r");
+        if (id_file) {
+            fscanf(id_file, "%d", &random_id);
+            fclose(id_file);
+        }
+        if (random_id == -1) {
+            fprintf(stderr, "Error: Could not read overlay ID for container %s.\n", pid_str);
+            continue;
+        }
+
+        char merged[PATH_MAX];
+        snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
+        
+        // Create mount point inside container
+        char container_mount_point[PATH_MAX];
+        snprintf(container_mount_point, sizeof(container_mount_point), "%s%s", merged, host_mount_point);
+        if (mkdir(container_mount_point, 0755) != 0 && errno != EEXIST) {
+            perror("Failed to create container mount point");
+            continue;
+        }
+
+        // Bind mount the host mount point to the container
+        if (mount(host_mount_point, container_mount_point, NULL, MS_BIND | MS_SLAVE, NULL) != 0) {
+            perror("Failed to bind mount to container");
+            continue;
+        }
+
+        // Store the mount point in state for cleanup
+        char shared_mount_path[PATH_MAX];
+        snprintf(shared_mount_path, sizeof(shared_mount_path), "%s/shared_mount", state_dir);
+        write_file(shared_mount_path, host_mount_point);
+
+        printf("Shared mount %s added to container %s at %s\n", device, pid_str, container_mount_point);
+    }
+
     return 0;
 }
 
@@ -603,7 +702,7 @@ int do_rm(int argc, char *argv[]) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <command> [args...]\nCommands: run, list, status, freeze, thaw, stop, start, rm\n", argv[0]);
+        fprintf(stderr, "Usage: %s <command> [args...]\nCommands: run, list, status, freeze, thaw, stop, start, rm, share-mount\n", argv[0]);
         return 1;
     }
     if (strcmp(argv[1], "run") == 0) { return do_run(argc - 1, &argv[1]);
@@ -614,6 +713,7 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[1], "stop") == 0) { return do_stop(argc - 1, &argv[1]);
     } else if (strcmp(argv[1], "start") == 0) { return do_start(argc - 1, &argv[1]);
     } else if (strcmp(argv[1], "rm") == 0) { return do_rm(argc - 1, &argv[1]);
+    } else if (strcmp(argv[1], "share-mount") == 0) { return do_share_mount(argc - 1, &argv[1]);
     } else {
         fprintf(stderr, "Unknown command: %s\n", argv[1]);
         return 1;
