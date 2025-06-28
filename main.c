@@ -186,13 +186,12 @@ int do_run(int argc, char *argv[]) {
     char *cpu_quota = NULL;
     char *io_read_bps = NULL;
     char *io_write_bps = NULL;
-    char *propagate_mount_dir = NULL; // ADDED: Variable for the mount propagation directory
+    char *propagate_mount_dir = NULL;
     int pin_cpu_flag = 0;
     int detach_flag = 0;
     int share_ipc_flag = 0;
     char pid_str[16];
 
-    // MODIFIED: Added the new --propagate-mount option
     static struct option long_options[] = {
         {"mem", required_argument, 0, 'm'},
         {"cpu", required_argument, 0, 'C'},
@@ -201,11 +200,11 @@ int do_run(int argc, char *argv[]) {
         {"pin-cpu", no_argument, NULL, 'p'},
         {"detach", no_argument, NULL, 'd'},
         {"share-ipc", no_argument, NULL, 'i'},
-        {"propagate-mount", required_argument, 0, 'M'}, // ADDED
+        {"propagate-mount", required_argument, 0, 'M'},
         {0, 0, 0, 0}
     };
     int opt;
-    while ((opt = getopt_long(argc, argv, "+m:C:r:w:pdiM:", long_options, NULL)) != -1) { // MODIFIED
+    while ((opt = getopt_long(argc, argv, "+m:C:r:w:pdiM:", long_options, NULL)) != -1) {
         switch (opt) {
             case 'm': mem_limit = optarg; break;
             case 'C': cpu_quota = optarg; break;
@@ -214,7 +213,7 @@ int do_run(int argc, char *argv[]) {
             case 'p': pin_cpu_flag = 1; break;
             case 'd': detach_flag = 1; break;
             case 'i': share_ipc_flag = 1; break;
-            case 'M': propagate_mount_dir = optarg; break; // ADDED
+            case 'M': propagate_mount_dir = optarg; break;
             default: return 1;
         }
     }
@@ -222,23 +221,15 @@ int do_run(int argc, char *argv[]) {
     char* image_name = argv[optind];
     char** container_cmd_argv = &argv[optind + 1];
 
-    // ADDED: Set the host directory mount as shared
     if (propagate_mount_dir) {
-        // This is crucial. It changes the mount propagation type for the given path to 'shared'.
-        // This means any mounts created under this path on the host will be propagated to peers.
         if (mount(NULL, propagate_mount_dir, NULL, MS_REC | MS_SHARED, NULL) != 0) {
             perror("Failed to set mount propagation to SHARED");
-            fprintf(stderr, "Hint: Make sure the directory '%s' exists.\n", propagate_mount_dir);
+            fprintf(stderr, "Hint: Make sure the directory '%s' exists and is a mount point.\n", propagate_mount_dir);
             return 1;
         }
     }
 
-
-    if (detach_flag) {
-        if (fork() != 0) { exit(0); }
-        setsid();
-        freopen("/dev/null", "r", stdin); freopen("/dev/null", "w", stdout); freopen("/dev/null", "w", stderr);
-    }
+    // NOTE: The old detach logic using fork() has been removed from here.
 
     char lowerdir[PATH_MAX], upperdir[PATH_MAX], workdir[PATH_MAX], merged[PATH_MAX];
     srand(time(NULL) ^ getpid());
@@ -255,11 +246,10 @@ int do_run(int argc, char *argv[]) {
     snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
     if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("Overlay mount failed"); return 1; }
 
-    // MODIFIED: Pass the propagate_mount_dir to the container
     struct container_args args;
     args.merged_path = merged;
     args.argv = container_cmd_argv;
-    args.propagate_mount_dir = propagate_mount_dir; // ADDED
+    args.propagate_mount_dir = propagate_mount_dir;
 
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
@@ -301,7 +291,6 @@ int do_run(int argc, char *argv[]) {
         write_file(path_buffer, "1");
     }
     
-    // ADDED: Save the propagated mount directory to the state
     if (propagate_mount_dir) {
         snprintf(path_buffer, sizeof(path_buffer), "%s/propagate_mount_dir", state_dir);
         write_file(path_buffer, propagate_mount_dir);
@@ -321,12 +310,10 @@ int do_run(int argc, char *argv[]) {
         CPU_SET(target_cpu, &cpuset);
         if (sched_setaffinity(container_pid, sizeof(cpu_set_t), &cpuset) != 0) {
             perror("sched_setaffinity failed");
-            return 1;
         }
         struct sched_param param = { .sched_priority = 50 };
         if (sched_setscheduler(container_pid, SCHED_RR, &param) != 0) {
             perror("sched_setscheduler failed");
-            return 1;
         }
         fseek(f, 0, SEEK_SET);
         fprintf(f, "%d", (next_cpu + 1) % num_cpus);
@@ -365,17 +352,21 @@ int do_run(int argc, char *argv[]) {
     snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
     write_file(procs_path, pid_str);
 
+    // MODIFIED: New, correct detach logic.
     if (detach_flag) {
         printf("Container started with PID %d\n", container_pid);
+        // In detach mode, the parent process (my_runner) exits immediately.
+        // The operating system will reparent the container process to the 'init' process (PID 1),
+        // allowing it to run independently in the background. This is the core of a daemonless architecture.
         return 0;
     }
 
+    // This part is for non-detached (foreground) mode. The parent waits for the container.
     printf("Container started with PID %d. Press Ctrl+C to stop.\n", container_pid);
     waitpid(container_pid, NULL, 0);
     printf("Container %d has exited. Use 'rm' to clean up.\n", container_pid);
     return 0;
 }
-
 
 
 int do_list(int argc, char *argv[]) {
