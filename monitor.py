@@ -8,7 +8,7 @@ bpf_text = """
 #include <linux/sched.h>
 #include <uapi/linux/bpf.h>
 
-// The data structure is the same
+// The data structure for the event
 struct data_t {
     u32 pid;
     char comm[TASK_COMM_LEN];
@@ -21,10 +21,19 @@ BPF_PERF_OUTPUT(events);
 
 // --- PROBE 1: For the 'clone' syscall ---
 TRACEPOINT_PROBE(syscalls, sys_enter_clone) {
-    // For this specific tracepoint, the flags are in a clean field `args->clone_flags`
+    // MODIFIED: Added a filter to only trace 'my_runner'
+    char comm[TASK_COMM_LEN];
+    bpf_get_current_comm(&comm, sizeof(comm));
+
+    char target_comm[] = "my_runner";
+    for (int i = 0; i < sizeof(target_comm) - 1; ++i) {
+        if (comm[i] != target_comm[i]) {
+            return 0; // Not our process, so we ignore it
+        }
+    }
+    // END MODIFICATION
+
     unsigned long clone_flags = args->clone_flags;
-    
-    // The namespace flags are defined in linux/sched.h
     if (clone_flags & (CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET)) {
         struct data_t data = {};
         data.pid = bpf_get_current_pid_tgid() >> 32;
@@ -40,21 +49,29 @@ TRACEPOINT_PROBE(syscalls, sys_enter_clone) {
 
 // --- PROBE 2: For the 'mkdir' syscall ---
 TRACEPOINT_PROBE(syscalls, sys_enter_mkdir) {
-    // For this tracepoint, the path is in a clean field `args->pathname`
+    // MODIFIED: Added a filter to only trace 'my_runner'
+    char comm[TASK_COMM_LEN];
+    bpf_get_current_comm(&comm, sizeof(comm));
+
+    char target_comm[] = "my_runner";
+    for (int i = 0; i < sizeof(target_comm) - 1; ++i) {
+        if (comm[i] != target_comm[i]) {
+            return 0; // Not our process, ignore it
+        }
+    }
+    // END MODIFICATION
+
     const char* path = (const char*)args->pathname;
-    
     char cgroup_path[] = "/sys/fs/cgroup";
-    char path_buf[15]; // Only need to read the beginning of the path
+    char path_buf[15];
     bpf_probe_read_user_str(&path_buf, sizeof(path_buf), path);
 
-    // Check if the path starts with our target
     for (int i = 0; i < sizeof(cgroup_path) - 1; ++i) {
         if (path_buf[i] != cgroup_path[i]) {
             return 0; // Not a cgroup path, ignore it
         }
     }
 
-    // If we get here, it's a cgroup-related mkdir
     struct data_t data = {};
     data.pid = bpf_get_current_pid_tgid() >> 32;
     bpf_get_current_comm(&data.comm, sizeof(data.comm));
@@ -86,7 +103,7 @@ def print_event(cpu, data, size):
 
 print("Starting eBPF monitoring... Press Ctrl+C to exit.")
 try:
-    # MODIFIED: Added cflags to suppress the macro redefinition warnings
+    # Added cflags to suppress the macro redefinition warnings
     cflags = ["-Wno-macro-redefined"]
     b = BPF(text=bpf_text, cflags=cflags)
     
