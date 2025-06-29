@@ -368,20 +368,34 @@ int do_run(int argc, char *argv[]) {
     return 0;
 }
 
-
 int do_list(int argc, char *argv[]) {
     DIR *d = opendir(MY_RUNTIME_STATE);
     if (d == NULL) {
-        if (errno == ENOENT) { printf("No containers exist.\n"); return 0; }
-        perror("opendir"); return 1;
+        if (errno == ENOENT) {
+            printf("No containers exist.\n");
+            return 0;
+        }
+        perror("opendir");
+        return 1;
     }
-    printf("%-15s\t%-10s\t%s\n", "CONTAINER PID", "STATUS", "COMMAND");
+
     struct dirent *dir_entry;
+    int found = 0;
+
     while ((dir_entry = readdir(d)) != NULL) {
-        if (dir_entry->d_type != DT_DIR || strcmp(dir_entry->d_name, ".") == 0 || strcmp(dir_entry->d_name, "..") == 0) continue;
+        if (dir_entry->d_type != DT_DIR || strcmp(dir_entry->d_name, ".") == 0 || strcmp(dir_entry->d_name, "..") == 0)
+            continue;
+
+        if (!found) {
+            // Print header only once, and only if we find at least one container
+            printf("%-15s\t%-10s\t%s\n", "CONTAINER PID", "STATUS", "COMMAND");
+            found = 1;
+        }
+
         char proc_path[PATH_MAX];
         snprintf(proc_path, sizeof(proc_path), "/proc/%s", dir_entry->d_name);
         const char* status = (access(proc_path, F_OK) == 0) ? "Running" : "Stopped";
+
         char cmd_path[PATH_MAX], cmd_buf[1024] = {0};
         snprintf(cmd_path, sizeof(cmd_path), "%s/%s/command", MY_RUNTIME_STATE, dir_entry->d_name);
         FILE *cmd_file = fopen(cmd_path, "r");
@@ -390,9 +404,16 @@ int do_list(int argc, char *argv[]) {
             cmd_buf[strcspn(cmd_buf, "\n")] = 0;
             fclose(cmd_file);
         }
+
         printf("%-15s\t%-10s\t%s\n", dir_entry->d_name, status, cmd_buf);
     }
+
     closedir(d);
+
+    if (!found) {
+        printf("No containers exist.\n");
+    }
+
     return 0;
 }
 
