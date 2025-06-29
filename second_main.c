@@ -71,7 +71,7 @@ void cleanup_mounts(int pid) {
 }
 
 void write_file(const char *path, const char *content) {
-    int fd = open(path, O_WRONLY);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd == -1) {
         fprintf(stderr, "DEBUG ERROR: Failed to open %s for writing: ", path);
         perror("");
