@@ -39,6 +39,7 @@ COMMANDS=(
     "/bin/touch" "/bin/rm" "/bin/mkdir" "/bin/mount" "/bin/umount"
     "/bin/dd" "/usr/bin/free" "/usr/bin/head" "/usr/bin/tail"
     "/usr/bin/stress" "/bin/hostname" "/usr/bin/whoami" "/usr/bin/ip"
+    "/usr/bin/ipcs" "/usr/bin/grep" "/usr/bin/clear"
 )
 
 # Create the basic directory structure for the image
