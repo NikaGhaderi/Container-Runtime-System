@@ -76,16 +76,18 @@ void cleanup_mounts(int pid) {
 
 
 void write_file(const char *path, const char *content) {
-    FILE *f = fopen(path, "w");
-    if (f == NULL) {
+    int fd = open(path, O_WRONLY);
+    if (fd == -1) {
         fprintf(stderr, "DEBUG ERROR: Failed to open %s for writing: ", path);
-        perror(""); // This will print the system error, e.g., "Permission denied"
+        perror("");
         return;
     }
-    if (fprintf(f, "%s", content) < 0) {
-        fprintf(stderr, "DEBUG ERROR: Failed to write to %s\n", path);
+    ssize_t bytes_written = write(fd, content, strlen(content));
+    if (bytes_written == -1) {
+        fprintf(stderr, "DEBUG ERROR: Failed to write to %s: ", path);
+        perror("");
     }
-    fclose(f);
+    close(fd);
 }
 
 void setup_cgroup_hierarchy() {
@@ -98,14 +100,22 @@ struct container_args {
     char* merged_path;
     char** argv;
     char* propagate_mount_dir;
+    int sync_pipe_read_fd; 
 };
-
 
 int container_main(void *arg) {
     struct container_args* args = (struct container_args*)arg;
+    char c;
 
-    // Bring up the loopback interface in the new network namespace.
-    // This is necessary to have a functional, albeit isolated, network environment.
+    // MODIFIED: Wait for parent to set up user namespace mappings.
+    // The child will block on this read() call until the parent closes
+    // the other end of the pipe, signaling that the maps are ready.
+    if (read(args->sync_pipe_read_fd, &c, 1) != 0) {
+        fprintf(stderr, "Child failed to sync with parent\n");
+        return 1;
+    }
+    close(args->sync_pipe_read_fd);
+
     if (system("ip link set lo up") != 0) {
         perror("Failed to set lo up");
     }
@@ -223,6 +233,13 @@ int do_run(int argc, char *argv[]) {
     char* image_name = argv[optind];
     char** container_cmd_argv = &argv[optind + 1];
 
+    // MODIFIED: Create pipe for parent-child synchronization
+    int sync_pipe[2];
+    if (pipe(sync_pipe) == -1) {
+        perror("pipe");
+        return 1;
+    }
+
     if (propagate_mount_dir) {
         if (mount(NULL, propagate_mount_dir, NULL, MS_REC | MS_SHARED, NULL) != 0) {
             perror("Failed to set mount propagation to SHARED");
@@ -250,22 +267,23 @@ int do_run(int argc, char *argv[]) {
     args.merged_path = merged;
     args.argv = container_cmd_argv;
     args.propagate_mount_dir = propagate_mount_dir;
+    args.sync_pipe_read_fd = sync_pipe[0]; // Pass read end of pipe to child
 
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
     
-    // MODIFIED: Added CLONE_NEWUSER and CLONE_NEWNET flags
     int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWUSER | CLONE_NEWNET | SIGCHLD;
     if (!share_ipc_flag) {
         clone_flags |= CLONE_NEWIPC;
     }
     pid_t container_pid = clone(container_main, stack_top, clone_flags, &args);
 
+    // MODIFIED: Parent closes the read end of the pipe
+    close(sync_pipe[0]);
+
     if (container_pid == -1) { perror("clone"); return 1; }
 
-    // MODIFIED: Correct User Namespace Mapping Logic
-    // This maps the container's root user (0) to the host's original user,
-    // even when run with sudo, by checking the SUDO_UID environment variable.
+    // User Namespace Mapping Logic
     char path_buffer[PATH_MAX];
     uid_t host_uid;
     gid_t host_gid;
@@ -274,34 +292,31 @@ int do_run(int argc, char *argv[]) {
     char *sudo_gid_str = getenv("SUDO_GID");
 
     if (sudo_uid_str && sudo_gid_str) {
-        // If run via sudo, use the original user's IDs from environment variables
         host_uid = atoi(sudo_uid_str);
         host_gid = atoi(sudo_gid_str);
     } else {
-        // Otherwise, use the current process's IDs (e.g., if run directly as root)
         host_uid = getuid();
         host_gid = getgid();
     }
-
+    
     printf("DEBUG: SUDO_UID env: %s\n", sudo_uid_str ? sudo_uid_str : "not set");
     printf("DEBUG: Host UID to map: %d\n", host_uid);
-    printf("DEBUG: Host GID to map: %d\n", host_gid);       
+    printf("DEBUG: Host GID to map: %d\n", host_gid);
 
-    // Disable setgroups before writing to gid_map
     snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/setgroups", container_pid);
     write_file(path_buffer, "deny");
 
-    // Write GID map: map container GID 0 to host GID
-    snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/gid_map", container_pid);
     char map_buffer[100];
+    snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/gid_map", container_pid);
     snprintf(map_buffer, sizeof(map_buffer), "0 %d 1", host_gid);
     write_file(path_buffer, map_buffer);
 
-    // Write UID map: map container UID 0 to host UID
     snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/uid_map", container_pid);
     snprintf(map_buffer, sizeof(map_buffer), "0 %d 1", host_uid);
     write_file(path_buffer, map_buffer);
-    // END ADDED LOGIC
+
+    // MODIFIED: Parent closes the write end of the pipe to signal child to continue
+    close(sync_pipe[1]);
 
     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
     char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, container_pid);
@@ -403,6 +418,7 @@ int do_run(int argc, char *argv[]) {
     printf("Container %d has exited. Use 'rm' to clean up.\n", container_pid);
     return 0;
 }
+
 
 
 int do_list(int argc, char *argv[]) {
