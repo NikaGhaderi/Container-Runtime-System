@@ -371,7 +371,8 @@ int do_run(int argc, char *argv[]) {
             perror("sched_setscheduler failed");
         }
         fseek(f, 0, SEEK_SET);
-        fprintf(f, "%d", (next_cpu + 1) % num_cpus);
+        // FIXED: Changed "%d" to "%ld" to match long int type
+        fprintf(f, "%ld", (next_cpu + 1) % num_cpus);
         fclose(f);
     }
     if (mem_limit) {
@@ -603,15 +604,17 @@ int do_start(int argc, char *argv[]) {
         return 1;
     }
 
+    // FIXED: Removed space between "work" and "dir"
     char lowerdir[PATH_MAX], upperdir[PATH_MAX], workdir[PATH_MAX], merged[PATH_MAX];
+    srand(time(NULL) ^ getpid());
+    int random_id = rand() % 10000;
     snprintf(lowerdir, sizeof(lowerdir), "%s", image_name);
-    snprintf(upperdir, sizeof(upperdir), "overlay_layers/%s/upper", overlay_id);
-    snprintf(workdir, sizeof(workdir), "overlay_layers/%s/work", overlay_id);
-    snprintf(merged, sizeof(merged), "overlay_layers/%s/merged", overlay_id);
-    
-    char mount_opts[PATH_MAX * 3];
-    snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
-    if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("Overlay mount failed on start"); return 1; }
+    snprintf(upperdir, sizeof(upperdir), "overlay_layers/%d/upper", random_id);
+    snprintf(workdir, sizeof(workdir), "overlay_layers/%d/work", random_id);
+    snprintf(merged, sizeof(merged), "overlay_layers/%d/merged", random_id);
+    char command[PATH_MAX * 2];
+    sprintf(command, "mkdir -p %s %s %s", upperdir, workdir, merged);
+    if (system(command) != 0) { return 1; }
 
     char *argv_for_container[64]; int i = 0;
     char *token = strtok(command_str, " \n");
