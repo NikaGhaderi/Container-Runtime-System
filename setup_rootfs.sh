@@ -38,11 +38,23 @@ COMMANDS=(
     "/bin/bash" "/bin/ls" "/bin/cat" "/bin/echo" "/bin/ps" "/bin/sleep"
     "/bin/touch" "/bin/rm" "/bin/mkdir" "/bin/mount" "/bin/umount"
     "/bin/dd" "/usr/bin/free" "/usr/bin/head" "/usr/bin/tail"
-    "/usr/bin/stress" "/bin/hostname" "/bin/whoami"
+    "/usr/bin/stress" "/bin/hostname" "/usr/bin/whoami" "/usr/bin/ip"
 )
 
 # Create the basic directory structure for the image
-mkdir -p "${IMAGE_DIR}"/{bin,lib,lib64,usr/bin,proc,tmp,dev}
+mkdir -p "${IMAGE_DIR}"/{bin,lib,lib64,usr/bin,proc,tmp,dev,etc,root}
+
+
+
+# ADDED: Create minimal /etc/passwd and /etc/group for user mapping
+
+echo "--> Creating /etc/passwd and /etc/group"
+
+echo "root:x:0:0:root:/root:/bin/bash" > "${IMAGE_DIR}/etc/passwd"
+
+echo "root:x:0:" > "${IMAGE_DIR}/etc/group"
+
+echo "nogroup:x:65534:" >> "${IMAGE_DIR}/etc/group"
 
 # Compile shm_writer and shm_reader if not already compiled
 if [ ! -f "shm_writer" ] || [ ! -f "shm_reader" ]; then
