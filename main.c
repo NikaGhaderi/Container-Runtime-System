@@ -78,11 +78,13 @@ void cleanup_mounts(int pid) {
 void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
     if (f == NULL) {
-        fprintf(stderr, "ERROR: Failed to open %s for writing: ", path);
-        perror("");
+        fprintf(stderr, "DEBUG ERROR: Failed to open %s for writing: ", path);
+        perror(""); // This will print the system error, e.g., "Permission denied"
         return;
     }
-    fprintf(f, "%s", content);
+    if (fprintf(f, "%s", content) < 0) {
+        fprintf(stderr, "DEBUG ERROR: Failed to write to %s\n", path);
+    }
     fclose(f);
 }
 
@@ -281,6 +283,9 @@ int do_run(int argc, char *argv[]) {
         host_gid = getgid();
     }
 
+    printf("DEBUG: SUDO_UID env: %s\n", sudo_uid_str ? sudo_uid_str : "not set");
+    printf("DEBUG: Host UID to map: %d\n", host_uid);
+    printf("DEBUG: Host GID to map: %d\n", host_gid);       
 
     // Disable setgroups before writing to gid_map
     snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/setgroups", container_pid);
