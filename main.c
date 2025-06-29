@@ -13,6 +13,7 @@
 #include <getopt.h>
 #include <dirent.h>
 #include <time.h>
+#include <fcntl.h>
 
 #define STACK_SIZE (1024 * 1024)
 #define MY_RUNTIME_CGROUP "/sys/fs/cgroup/my_runtime"
@@ -100,35 +101,33 @@ struct container_args {
 int container_main(void *arg) {
     struct container_args* args = (struct container_args*)arg;
 
-    // ADDED: Handle propagated mount inside the container
+    // Bring up the loopback interface in the new network namespace.
+    // This is necessary to have a functional, albeit isolated, network environment.
+    if (system("ip link set lo up") != 0) {
+        perror("Failed to set lo up");
+    }
+
     if (args->propagate_mount_dir) {
         char container_mount_path[PATH_MAX];
         char command[PATH_MAX * 2];
         
-        // Construct the full path inside the container's rootfs
         snprintf(container_mount_path, sizeof(container_mount_path), "%s%s", args->merged_path, args->propagate_mount_dir);
 
-        // Create the directory inside the container's rootfs (e.g., /merged/shared_data)
-        // Using system("mkdir -p ...") is a robust way to create parent dirs if they don't exist
         snprintf(command, sizeof(command), "mkdir -p %s", container_mount_path);
         if (system(command) != 0) {
             perror("mkdir -p for propagated mount failed");
-            // Not fatal, we can continue
         }
 
-        // Bind mount the host directory to the container directory.
-        // Because the host dir was marked MS_SHARED, mount events will propagate.
         if (mount(args->propagate_mount_dir, container_mount_path, NULL, MS_BIND, NULL) != 0) {
             perror("bind mount for propagation failed");
-            // Not fatal, we can continue
         }
     }
-
 
     sethostname("container", 9);
     if (chroot(args->merged_path) != 0) { perror("chroot failed"); return 1; }
     if (chdir("/") != 0) { perror("chdir failed"); return 1; }
     if (mount("proc", "/proc", "proc", 0, NULL) != 0) { perror("mount proc failed"); }
+    
     execv(args->argv[0], args->argv);
     perror("execv failed");
     return 1;
@@ -229,8 +228,6 @@ int do_run(int argc, char *argv[]) {
         }
     }
 
-    // NOTE: The old detach logic using fork() has been removed from here.
-
     char lowerdir[PATH_MAX], upperdir[PATH_MAX], workdir[PATH_MAX], merged[PATH_MAX];
     srand(time(NULL) ^ getpid());
     int random_id = rand() % 10000;
@@ -253,7 +250,9 @@ int do_run(int argc, char *argv[]) {
 
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
-    int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD;
+    
+    // MODIFIED: Added CLONE_NEWUSER and CLONE_NEWNET flags
+    int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWUSER | CLONE_NEWNET | SIGCHLD;
     if (!share_ipc_flag) {
         clone_flags |= CLONE_NEWIPC;
     }
@@ -261,11 +260,32 @@ int do_run(int argc, char *argv[]) {
 
     if (container_pid == -1) { perror("clone"); return 1; }
 
+    // ADDED: User Namespace Mapping Logic
+    // This maps the container's root user (0) to the host's current user.
+    char path_buffer[PATH_MAX];
+    uid_t host_uid = getuid();
+    gid_t host_gid = getgid();
+
+    // Disable setgroups before writing to gid_map
+    snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/setgroups", container_pid);
+    write_file(path_buffer, "deny");
+
+    // Write GID map: map container GID 0 to host GID
+    snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/gid_map", container_pid);
+    char map_buffer[100];
+    snprintf(map_buffer, sizeof(map_buffer), "0 %d 1", host_gid);
+    write_file(path_buffer, map_buffer);
+
+    // Write UID map: map container UID 0 to host UID
+    snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/uid_map", container_pid);
+    snprintf(map_buffer, sizeof(map_buffer), "0 %d 1", host_uid);
+    write_file(path_buffer, map_buffer);
+    // END ADDED LOGIC
+
     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
     char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, container_pid);
     if(mkdir(cgroup_path, 0755) != 0 && errno != EEXIST) { perror("Failed to create container cgroup"); }
 
-    char path_buffer[PATH_MAX];
     snprintf(path_buffer, sizeof(path_buffer), "%s/command", state_dir);
     FILE *cmd_file = fopen(path_buffer, "w");
     if (cmd_file) {
@@ -352,21 +372,17 @@ int do_run(int argc, char *argv[]) {
     snprintf(pid_str, sizeof(pid_str), "%d", container_pid);
     write_file(procs_path, pid_str);
 
-    // MODIFIED: New, correct detach logic.
     if (detach_flag) {
         printf("Container started with PID %d\n", container_pid);
-        // In detach mode, the parent process (my_runner) exits immediately.
-        // The operating system will reparent the container process to the 'init' process (PID 1),
-        // allowing it to run independently in the background. This is the core of a daemonless architecture.
         return 0;
     }
 
-    // This part is for non-detached (foreground) mode. The parent waits for the container.
     printf("Container started with PID %d. Press Ctrl+C to stop.\n", container_pid);
     waitpid(container_pid, NULL, 0);
     printf("Container %d has exited. Use 'rm' to clean up.\n", container_pid);
     return 0;
 }
+
 
 int do_list(int argc, char *argv[]) {
     DIR *d = opendir(MY_RUNTIME_STATE);
