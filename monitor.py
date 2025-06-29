@@ -67,11 +67,13 @@ TRACEPOINT_PROBE(syscalls, sys_enter_mkdir) {
 }
 """
 
-# The Python part of the script is completely unchanged.
+# The Python data structure for receiving the event
 class Data(ct.Structure):
     _fields_ = [
         ("pid", ct.c_uint), ("comm", ct.c_char * 16), ("syscall_name", ct.c_char * 32),
     ]
+
+# The callback function that processes the event
 def print_event(cpu, data, size):
     event = ct.cast(data, ct.POINTER(Data)).contents
     current_time = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -84,11 +86,15 @@ def print_event(cpu, data, size):
 
 print("Starting eBPF monitoring... Press Ctrl+C to exit.")
 try:
-    b = BPF(text=bpf_text)
-    # The Python part does not need to change. BCC handles attaching all probes defined in the C code.
+    # MODIFIED: Added cflags to suppress the macro redefinition warnings
+    cflags = ["-Wno-macro-redefined"]
+    b = BPF(text=bpf_text, cflags=cflags)
+    
     b["events"].open_perf_buffer(print_event)
     while True:
-        try: b.perf_buffer_poll()
-        except KeyboardInterrupt: exit()
+        try: 
+            b.perf_buffer_poll()
+        except KeyboardInterrupt: 
+            exit()
 except Exception as e:
     print(f"Error: {e}")
