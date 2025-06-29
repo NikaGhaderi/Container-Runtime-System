@@ -143,8 +143,9 @@ int container_main(void *arg) {
     if (chdir("/") != 0) { perror("chdir failed"); return 1; }
     if (mount("proc", "/proc", "proc", 0, NULL) != 0) { perror("mount proc failed"); }
     
-    execv(args->argv[0], args->argv);
-    perror("execv failed");
+    // Use script to make the shell interactive
+    execlp("script", "script", "-q", "-c", args->argv[0], "/dev/null", NULL);
+    perror("execlp failed");
     return 1;
 }
 
