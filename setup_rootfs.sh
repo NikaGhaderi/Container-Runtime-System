@@ -38,7 +38,7 @@ COMMANDS=(
     "/bin/bash" "/bin/ls" "/bin/cat" "/bin/echo" "/bin/ps" "/bin/sleep"
     "/bin/touch" "/bin/rm" "/bin/mkdir" "/bin/mount" "/bin/umount"
     "/bin/dd" "/usr/bin/free" "/usr/bin/head" "/usr/bin/tail"
-    "/usr/bin/stress" "/bin/hostname"
+    "/usr/bin/stress" "/bin/hostname" "/bin/whoami"
 )
 
 # Create the basic directory structure for the image
