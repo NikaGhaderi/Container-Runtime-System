@@ -38,19 +38,21 @@ void cleanup_mounts(int pid) {
         char proc_to_unmount[PATH_MAX];
         snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
 
+        // Unmount /proc with lazy detach
         if (umount2(proc_to_unmount, MNT_DETACH) != 0) {
             if (errno != ENOENT && errno != EINVAL) {
                 perror("umount2 proc failed");
             }
         }
 
+        // ADDED: Unmount the propagated mount if it exists
         char propagate_mount_path[PATH_MAX];
         snprintf(propagate_mount_path, sizeof(propagate_mount_path), "%s/propagate_mount_dir", state_dir);
         FILE* p_file = fopen(propagate_mount_path, "r");
         if (p_file) {
             char p_dir[PATH_MAX];
             if (fgets(p_dir, sizeof(p_dir), p_file)) {
-                 p_dir[strcspn(p_dir, "\n")] = 0;
+                 p_dir[strcspn(p_dir, "\n")] = 0; // Remove newline
                  char container_mount_point[PATH_MAX];
                  snprintf(container_mount_point, sizeof(container_mount_point), "%s%s", merged, p_dir);
                  if (umount2(container_mount_point, MNT_DETACH) != 0) {
@@ -62,6 +64,7 @@ void cleanup_mounts(int pid) {
             fclose(p_file);
         }
 
+        // Unmount overlay with lazy detach
         if (umount2(merged, MNT_DETACH) != 0) {
             if (errno != ENOENT && errno != EINVAL) {
                 perror("umount2 overlay failed");
@@ -71,18 +74,14 @@ void cleanup_mounts(int pid) {
 }
 
 void write_file(const char *path, const char *content) {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd == -1) {
-        fprintf(stderr, "DEBUG ERROR: Failed to open %s for writing: ", path);
+    FILE *f = fopen(path, "w");
+    if (f == NULL) {
+        fprintf(stderr, "ERROR: Failed to open %s for writing: ", path);
         perror("");
         return;
     }
-    ssize_t bytes_written = write(fd, content, strlen(content));
-    if (bytes_written == -1) {
-        fprintf(stderr, "DEBUG ERROR: Failed to write to %s: ", path);
-        perror("");
-    }
-    close(fd);
+    fprintf(f, "%s", content);
+    fclose(f);
 }
 
 void setup_cgroup_hierarchy() {
@@ -95,20 +94,21 @@ struct container_args {
     char* merged_path;
     char** argv;
     char* propagate_mount_dir;
-    int sync_pipe_read_fd; 
+    int sync_pipe_read_fd; // ADDED for user namespace synchronization
 };
 
 int container_main(void *arg) {
     struct container_args* args = (struct container_args*)arg;
-    char c;
 
+    // ADDED: Synchronize with parent to ensure UID/GID mappings are set
+    char c;
     if (read(args->sync_pipe_read_fd, &c, 1) != 0) {
         fprintf(stderr, "Child failed to sync with parent\n");
         return 1;
     }
     close(args->sync_pipe_read_fd);
 
-    // Set GID and UID to 0 in the new user namespace
+    // ADDED: Set UID and GID to 0 within the user namespace
     if (setgid(0) != 0) {
         perror("setgid failed");
         return 1;
@@ -118,6 +118,8 @@ int container_main(void *arg) {
         return 1;
     }
 
+    // Bring up the loopback interface in the new network namespace.
+    // This is necessary to have a functional, albeit isolated, network environment.
     if (system("ip link set lo up") != 0) {
         perror("Failed to set lo up");
     }
@@ -143,9 +145,8 @@ int container_main(void *arg) {
     if (chdir("/") != 0) { perror("chdir failed"); return 1; }
     if (mount("proc", "/proc", "proc", 0, NULL) != 0) { perror("mount proc failed"); }
     
-    // Use script to make the shell interactive
-    execlp("script", "script", "-q", "-c", args->argv[0], "/dev/null", NULL);
-    perror("execlp failed");
+    execv(args->argv[0], args->argv);
+    perror("execv failed");
     return 1;
 }
 
@@ -163,7 +164,7 @@ void format_bytes(long bytes, char *buf, size_t size) {
     int i = 0;
     double d_bytes = bytes;
     if (bytes < 0) {
-        snprintf(buf, size, "N/A");
+        snprintf(buf, size, "  N/A");
         return;
     }
     while (d_bytes >= 1024 && i < 4) {
@@ -235,12 +236,6 @@ int do_run(int argc, char *argv[]) {
     char* image_name = argv[optind];
     char** container_cmd_argv = &argv[optind + 1];
 
-    int sync_pipe[2];
-    if (pipe(sync_pipe) == -1) {
-        perror("pipe");
-        return 1;
-    }
-
     if (propagate_mount_dir) {
         if (mount(NULL, propagate_mount_dir, NULL, MS_REC | MS_SHARED, NULL) != 0) {
             perror("Failed to set mount propagation to SHARED");
@@ -249,7 +244,7 @@ int do_run(int argc, char *argv[]) {
         }
     }
 
-    char lowerdir[PATH_MAX], upperdir[PATH_MAX], workdir[PATH_MAX], merged[PATH_MAX];
+    char lowerdir[PATH_MAX], upperdir[PATH_MAX], work  dir[PATH_MAX], merged[PATH_MAX];
     srand(time(NULL) ^ getpid());
     int random_id = rand() % 10000;
     snprintf(lowerdir, sizeof(lowerdir), "%s", image_name);
@@ -268,6 +263,13 @@ int do_run(int argc, char *argv[]) {
     args.merged_path = merged;
     args.argv = container_cmd_argv;
     args.propagate_mount_dir = propagate_mount_dir;
+
+    // ADDED: Create synchronization pipe for user namespace
+    int sync_pipe[2];
+    if (pipe(sync_pipe) == -1) {
+        perror("pipe");
+        return 1;
+    }
     args.sync_pipe_read_fd = sync_pipe[0];
 
     char *container_stack = malloc(STACK_SIZE);
@@ -279,9 +281,10 @@ int do_run(int argc, char *argv[]) {
     }
     pid_t container_pid = clone(container_main, stack_top, clone_flags, &args);
 
-    close(sync_pipe[0]);
-
     if (container_pid == -1) { perror("clone"); return 1; }
+
+    // ADDED: Close parent's read end of the pipe
+    close(sync_pipe[0]);
 
     char path_buffer[PATH_MAX];
     uid_t host_uid;
@@ -297,16 +300,12 @@ int do_run(int argc, char *argv[]) {
         host_uid = getuid();
         host_gid = getgid();
     }
-    
-    printf("DEBUG: SUDO_UID env: %s\n", sudo_uid_str ? sudo_uid_str : "not set");
-    printf("DEBUG: Host UID to map: %d\n", host_uid);
-    printf("DEBUG: Host GID to map: %d\n", host_gid);
 
     snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/setgroups", container_pid);
     write_file(path_buffer, "deny");
 
-    char map_buffer[100];
     snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/gid_map", container_pid);
+    char map_buffer[100];
     snprintf(map_buffer, sizeof(map_buffer), "0 %d 1", host_gid);
     write_file(path_buffer, map_buffer);
 
@@ -314,6 +313,7 @@ int do_run(int argc, char *argv[]) {
     snprintf(map_buffer, sizeof(map_buffer), "0 %d 1", host_uid);
     write_file(path_buffer, map_buffer);
 
+    // ADDED: Close write end of the pipe after mappings are set
     close(sync_pipe[1]);
 
     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
@@ -328,6 +328,7 @@ int do_run(int argc, char *argv[]) {
     }
 
     snprintf(path_buffer, sizeof(path_buffer), "%s/image_name", state_dir);
+   /running_with_sudo getuid());
     write_file(path_buffer, image_name);
 
     char random_id_str[16];
@@ -436,6 +437,7 @@ int do_list(int argc, char *argv[]) {
             continue;
 
         if (!found) {
+            // Print header only once, and only if we find at least one container
             printf("%-15s\t%-10s\t%s\n", "CONTAINER PID", "STATUS", "COMMAND");
             found = 1;
         }
@@ -479,6 +481,7 @@ int do_status(int argc, char *argv[]) {
         cmd_buf[strcspn(cmd_buf, "\n")] = 0; printf("%-25s: %s\n", "Command", cmd_buf); fclose(f);
     }
     
+    // ADDED: Display propagated mount in status
     snprintf(path_buffer, sizeof(path_buffer), "%s/propagate_mount_dir", state_dir);
     f = fopen(path_buffer, "r");
     if (f) {
@@ -529,7 +532,9 @@ int do_stop(int argc, char *argv[]) {
     if (kill(pid, SIGKILL) != 0) {
         perror("kill failed");
     } else {
+        // Wait for process to exit
         waitpid(pid, NULL, 0);
+        // Clean up mounts after stopping
         cleanup_mounts(pid);
     }
     printf("Container %d stopped.\n", pid);
@@ -728,6 +733,7 @@ int do_rm(int argc, char *argv[]) {
     }
     snprintf(command, sizeof(command), "rm -rf %s", state_dir);
     system(command);
+    // Remove the cgroup directory
     char cgroup_dir[PATH_MAX];
     snprintf(cgroup_dir, sizeof(cgroup_dir), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
     if (rmdir(cgroup_dir) != 0) {
