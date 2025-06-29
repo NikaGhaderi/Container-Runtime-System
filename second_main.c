@@ -13,7 +13,7 @@
 #include <getopt.h>
 #include <dirent.h>
 #include <time.h>
-#include <fcntl.h> // For open()
+#include <fcntl.h>
 
 #define STACK_SIZE (1024 * 1024)
 #define MY_RUNTIME_CGROUP "/sys/fs/cgroup/my_runtime"
@@ -71,9 +71,9 @@ void cleanup_mounts(int pid) {
 }
 
 void write_file(const char *path, const char *content) {
-    int fd = open(path, O_WRONLY | O_CREAT, 0644);
+    int fd = open(path, O_WRONLY);
     if (fd == -1) {
-        fprintf(stderr, "DEBUG ERROR: Failed to open/create %s: ", path);
+        fprintf(stderr, "DEBUG ERROR: Failed to open %s for writing: ", path);
         perror("");
         return;
     }
@@ -107,6 +107,16 @@ int container_main(void *arg) {
         return 1;
     }
     close(args->sync_pipe_read_fd);
+
+    // Set GID and UID to 0 in the new user namespace
+    if (setgid(0) != 0) {
+        perror("setgid failed");
+        return 1;
+    }
+    if (setuid(0) != 0) {
+        perror("setuid failed");
+        return 1;
+    }
 
     if (system("ip link set lo up") != 0) {
         perror("Failed to set lo up");
@@ -180,7 +190,6 @@ long find_cgroup_value(const char* path, const char* key) {
    fclose(f);
    return value;
 }
-
 
 // --- CLI Command Functions ---
 
@@ -273,15 +282,6 @@ int do_run(int argc, char *argv[]) {
 
     if (container_pid == -1) { perror("clone"); return 1; }
 
-    // MODIFIED: Correct logical order. Create state dir FIRST.
-    char state_dir[PATH_MAX];
-    snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid);
-    if (mkdir(state_dir, 0755) != 0 && errno != EEXIST) {
-        fprintf(stderr, "DEBUG ERROR: Failed to create state directory %s: ", state_dir);
-        perror("");
-    }
-
-    // User Namespace Mapping Logic
     char path_buffer[PATH_MAX];
     uid_t host_uid;
     gid_t host_gid;
@@ -297,6 +297,10 @@ int do_run(int argc, char *argv[]) {
         host_gid = getgid();
     }
     
+    printf("DEBUG: SUDO_UID env: %s\n", sudo_uid_str ? sudo_uid_str : "not set");
+    printf("DEBUG: Host UID to map: %d\n", host_uid);
+    printf("DEBUG: Host GID to map: %d\n", host_gid);
+
     snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/setgroups", container_pid);
     write_file(path_buffer, "deny");
 
@@ -311,8 +315,8 @@ int do_run(int argc, char *argv[]) {
 
     close(sync_pipe[1]);
 
-    char cgroup_path[PATH_MAX]; 
-    snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, container_pid);
+    char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
+    char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, container_pid);
     if(mkdir(cgroup_path, 0755) != 0 && errno != EEXIST) { perror("Failed to create container cgroup"); }
 
     snprintf(path_buffer, sizeof(path_buffer), "%s/command", state_dir);
@@ -320,8 +324,6 @@ int do_run(int argc, char *argv[]) {
     if (cmd_file) {
         for (int i = 0; container_cmd_argv[i] != NULL; i++) { fprintf(cmd_file, "%s ", container_cmd_argv[i]); }
         fclose(cmd_file);
-    } else {
-        fprintf(stderr, "DEBUG ERROR: Failed to open %s with fopen\n", path_buffer);
     }
 
     snprintf(path_buffer, sizeof(path_buffer), "%s/image_name", state_dir);
@@ -414,8 +416,6 @@ int do_run(int argc, char *argv[]) {
     return 0;
 }
 
-
-
 int do_list(int argc, char *argv[]) {
     DIR *d = opendir(MY_RUNTIME_STATE);
     if (d == NULL) {
@@ -454,10 +454,13 @@ int do_list(int argc, char *argv[]) {
 
         printf("%-15s\t%-10s\t%s\n", dir_entry->d_name, status, cmd_buf);
     }
+
     closedir(d);
+
     if (!found) {
         printf("No containers exist.\n");
     }
+
     return 0;
 }
 
@@ -484,7 +487,6 @@ int do_status(int argc, char *argv[]) {
         printf("%-25s: %s\n", "Propagated Mount", p_dir);
         fclose(f);
     }
-
 
     char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
     printf("\n--- Resources ---\n");
@@ -534,8 +536,164 @@ int do_stop(int argc, char *argv[]) {
 }
 
 int do_start(int argc, char *argv[]) {
-    fprintf(stderr, "The 'start' command has not been updated for this feature yet.\n");
-    return 1;
+    if (argc < 2) { fprintf(stderr, "Usage: %s start <stopped_container_pid>\n", argv[0]); return 1; }
+    char *pid_str = argv[1];
+    char proc_path[PATH_MAX]; snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
+    if (access(proc_path, F_OK) == 0) {
+        fprintf(stderr, "Error: Container %s is already running.\n", pid_str);
+        return 1;
+    }
+    
+    char old_state_dir[PATH_MAX]; snprintf(old_state_dir, sizeof(old_state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
+    if (access(old_state_dir, F_OK) != 0) {
+        fprintf(stderr, "Error: No stopped container with ID %s found.\n", pid_str);
+        return 1;
+    }
+
+    int original_detach_flag = 0;
+    int share_ipc_flag = 0;
+    char path_buffer[PATH_MAX];
+    snprintf(path_buffer, sizeof(path_buffer), "%s/detach", old_state_dir);
+    if (access(path_buffer, F_OK) == 0) {
+        original_detach_flag = 1;
+    }
+    snprintf(path_buffer, sizeof(path_buffer), "%s/share_ipc", old_state_dir);
+    if (access(path_buffer, F_OK) == 0) {
+        share_ipc_flag = 1;
+    }
+
+    printf("Starting container %s...\n", pid_str);
+    
+    char image_name[PATH_MAX] = {0}; char overlay_id[16] = {0}; char command_str[1024] = {0};
+    char mem_limit[32] = {0}; char cpu_quota[32] = {0}; char io_read_bps[32] = {0}; char io_write_bps[32] = {0};
+    int pin_cpu_flag = 0;
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/image_name", old_state_dir);
+    FILE* f = fopen(path_buffer, "r"); if (f) { fgets(image_name, sizeof(image_name)-1, f); fclose(f); image_name[strcspn(image_name, "\n")] = 0; }
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/overlay_id", old_state_dir);
+    f = fopen(path_buffer, "r"); if (f) { fgets(overlay_id, sizeof(overlay_id)-1, f); fclose(f); overlay_id[strcspn(overlay_id, "\n")] = 0;}
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/command", old_state_dir);
+    f = fopen(path_buffer, "r"); if (f) { fgets(command_str, sizeof(command_str)-1, f); fclose(f); }
+
+    snprintf(path_buffer, sizeof(path_buffer), "%s/mem_limit", old_state_dir);
+    f = fopen(path_buffer, "r"); if (f) { fgets(mem_limit, sizeof(mem_limit)-1, f); fclose(f); }
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/cpu_quota", old_state_dir);
+    f = fopen(path_buffer, "r"); if (f) { fgets(cpu_quota, sizeof(cpu_quota)-1, f); fclose(f); }
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/io_read_bps", old_state_dir);
+    f = fopen(path_buffer, "r"); if (f) { fgets(io_read_bps, sizeof(io_read_bps)-1, f); fclose(f); }
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/io_write_bps", old_state_dir);
+    f = fopen(path_buffer, "r"); if (f) { fgets(io_write_bps, sizeof(io_write_bps)-1, f); fclose(f); }
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/pin_cpu", old_state_dir);
+    if (access(path_buffer, F_OK) == 0) { pin_cpu_flag = 1; }
+
+    if (strlen(image_name) == 0 || strlen(overlay_id) == 0 || strlen(command_str) == 0) {
+        fprintf(stderr, "Error: Container configuration is corrupt or missing.\n");
+        return 1;
+    }
+
+    char lowerdir[PATH_MAX], upperdir[PATH_MAX], workdir[PATH_MAX], merged[PATH_MAX];
+    snprintf(lowerdir, sizeof(lowerdir), "%s", image_name);
+    snprintf(upperdir, sizeof(upperdir), "overlay_layers/%s/upper", overlay_id);
+    snprintf(workdir, sizeof(workdir), "overlay_layers/%s/work", overlay_id);
+    snprintf(merged, sizeof(merged), "overlay_layers/%s/merged", overlay_id);
+    
+    char mount_opts[PATH_MAX * 3];
+    snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
+    if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("Overlay mount failed on start"); return 1; }
+
+    char *argv_for_container[64]; int i = 0;
+    char *token = strtok(command_str, " \n");
+    while(token != NULL) {
+        argv_for_container[i++] = token;
+        token = strtok(NULL, " \n");
+    }
+    argv_for_container[i] = NULL;
+
+    struct container_args args; args.merged_path = merged; args.argv = argv_for_container;
+    char *container_stack = malloc(STACK_SIZE);
+    char *stack_top = container_stack + STACK_SIZE;
+    int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD;
+    if (!share_ipc_flag) {
+        clone_flags |= CLONE_NEWIPC;
+    }
+    pid_t new_pid = clone(container_main, stack_top, clone_flags, &args);
+
+    if (new_pid == -1) { perror("clone failed on start"); return 1; }
+
+    char new_state_dir[PATH_MAX];
+    snprintf(new_state_dir, sizeof(new_state_dir), "%s/%d", MY_RUNTIME_STATE, new_pid);
+    rename(old_state_dir, new_state_dir);
+
+    char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, new_pid);
+    mkdir(cgroup_path, 0755);
+    
+    if (pin_cpu_flag) {
+        FILE *f_cpu = fopen(NEXT_CPU_FILE, "r+"); 
+        int next_cpu = 0; 
+        if (f_cpu) { fscanf(f_cpu, "%d", &next_cpu); } 
+        else { f_cpu = fopen(NEXT_CPU_FILE, "w"); }
+        long num_cpus = sysconf(_SC_NPROCESSORS_ONLN); 
+        int target_cpu = next_cpu % num_cpus;
+        cpu_set_t cpuset; 
+        CPU_ZERO(&cpuset); 
+        CPU_SET(target_cpu, &cpuset);
+        if (sched_setaffinity(new_pid, sizeof(cpu_set_t), &cpuset) != 0) {
+            perror("sched_setaffinity failed");
+            return 1;
+        }
+        struct sched_param param = { .sched_priority = 50 };
+        if (sched_setscheduler(new_pid, SCHED_RR, &param) != 0) {
+            perror("sched_setscheduler failed");
+            return 1;
+        }
+        fseek(f_cpu, 0, SEEK_SET); 
+        fprintf(f_cpu, "%d", (next_cpu + 1) % num_cpus);
+        fclose(f_cpu);
+    }
+    if (strlen(mem_limit) > 0) {
+        snprintf(path_buffer, sizeof(path_buffer), "%s/memory.max", cgroup_path); write_file(path_buffer, mem_limit);
+        snprintf(path_buffer, sizeof(path_buffer), "%s/memory.swap.max", cgroup_path); write_file(path_buffer, "0");
+    }
+    if (strlen(cpu_quota) > 0) {
+        char cpu_content[64];
+        snprintf(path_buffer, sizeof(path_buffer), "%s/cpu.max", cgroup_path);
+        snprintf(cpu_content, sizeof(cpu_content), "%s 100000", cpu_quota);
+        write_file(path_buffer, cpu_content);
+    }
+    if (strlen(io_read_bps) > 0 || strlen(io_write_bps) > 0) {
+        char io_content[128];
+        snprintf(io_content, sizeof(io_content), "8:0 rbps=%s wbps=%s",
+                 strlen(io_read_bps) > 0 ? io_read_bps : "max",
+                 strlen(io_write_bps) > 0 ? io_write_bps : "max");
+        snprintf(path_buffer, sizeof(path_buffer), "%s/io.max", cgroup_path);
+        write_file(path_buffer, io_content);
+    }
+    
+    char procs_path[PATH_MAX]; snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
+    char new_pid_str[16]; snprintf(new_pid_str, sizeof(new_pid_str), "%d", new_pid);
+    write_file(procs_path, new_pid_str);
+    
+    if (original_detach_flag) {
+        printf("Container %s started with new PID %d\n", pid_str, new_pid);
+        return 0;
+    } else {
+        printf("Container %s started with new PID %d. Press Ctrl+C to stop.\n", pid_str, new_pid);
+        waitpid(new_pid, NULL, 0);
+        printf("Container %d has exited. Use 'rm' to clean up.\n", new_pid);
+    }
+
+    char proc_to_unmount[PATH_MAX];
+    snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
+    umount(proc_to_unmount);
+    umount(merged);
+
+    return 0;
 }
 
 int do_rm(int argc, char *argv[]) {
@@ -579,7 +737,6 @@ int do_rm(int argc, char *argv[]) {
     printf("Container %s removed.\n", pid_str);
     return 0;
 }
-
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
