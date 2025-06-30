@@ -110,12 +110,20 @@ struct container_args {
     char* merged_path;
     char** argv;
     char* propagate_mount_dir;
-    int sync_pipe_read_fd;
+    int sync_pipe_read_fd; 
 };
-
 
 int container_main(void *arg) {
     struct container_args* args = (struct container_args*)arg;
+
+    // Wait for parent to set up mappings
+    char buf;
+    if (read(args->sync_pipe_read_fd, &buf, 1) != 1) {
+        perror("Failed to read from sync pipe");
+        // Proceed anyway to avoid hanging, but log the error
+    }
+    close(args->sync_pipe_read_fd);
+
 
     // Bring up the loopback interface in the new network namespace.
     // This is necessary to have a functional, albeit isolated, network environment.
@@ -744,20 +752,21 @@ int do_start(int argc, char *argv[]) {
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
     int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWUSER | CLONE_NEWNET | SIGCHLD;
-    if (share_ipc_flag) {
-        // Note: The original code had a bug here, it should be |= not =
-        clone_flags |= CLONE_NEWIPC; 
+    if (!share_ipc_flag) { // Fix the logic to match do_run
+        clone_flags |= CLONE_NEWIPC;
     }
     pid_t new_pid = clone(container_main, stack_top, clone_flags, &args);
+    if (new_pid == -1) {
+        perror("clone failed on start");
+        free(container_stack);
+        close(sync_pipe[0]);
+        close(sync_pipe[1]);
+        return 1;
+    }
 
     close(sync_pipe[0]);
 
-    if (new_pid == -1) { 
-        perror("clone failed on start"); 
-        return 1; 
-    }
-
-    // --- Set up user namespace and cgroups for the new PID ---
+    // Set up user namespace and cgroups for the new PID
     uid_t host_uid;
     gid_t host_gid;
     char *sudo_uid_str = getenv("SUDO_UID");
@@ -770,7 +779,7 @@ int do_start(int argc, char *argv[]) {
         host_uid = getuid();
         host_gid = getgid();
     }
-    
+
     snprintf(path_buffer, sizeof(path_buffer), "/proc/%ld/setgroups", (long)new_pid);
     write_file(path_buffer, "deny");
     char map_buffer[100];
@@ -780,8 +789,12 @@ int do_start(int argc, char *argv[]) {
     snprintf(path_buffer, sizeof(path_buffer), "/proc/%ld/uid_map", (long)new_pid);
     snprintf(map_buffer, sizeof(map_buffer), "0 %d 1", host_uid);
     write_file(path_buffer, map_buffer);
-    
-    close(sync_pipe[1]);
+
+    // Signal child that mappings are set
+    if (write(sync_pipe[1], "1", 1) != 1) {
+        perror("write to sync pipe");
+    }
+    close(sync_pipe[1]); // Close write end
 
     // --- Rename state directory and re-apply cgroup settings ---
     char new_state_dir[PATH_MAX];
