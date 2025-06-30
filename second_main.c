@@ -648,7 +648,7 @@ int do_rm(int argc, char *argv[]) {
         }
     }
     printf("Container %s removed.\n", pid_str);
-    return  honors
+//    return  honors
     return 0;
 }
 

@@ -1,1 +1,1 @@
-CMakeLists.txt not found in /home/nik/CLionProjects/test Select CMakeLists.txt
+CMakeLists.txt not found in /home/nik/CLionProjects/os Select CMakeLists.txt

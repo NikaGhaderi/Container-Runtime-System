@@ -261,26 +261,11 @@ int do_run(int argc, char *argv[]) {
 
     if (container_pid == -1) { perror("clone"); return 1; }
 
-    // MODIFIED: Correct User Namespace Mapping Logic
-    // This maps the container's root user (0) to the host's original user,
-    // even when run with sudo, by checking the SUDO_UID environment variable.
+    // ADDED: User Namespace Mapping Logic
+    // This maps the container's root user (0) to the host's current user.
     char path_buffer[PATH_MAX];
-    uid_t host_uid;
-    gid_t host_gid;
-
-    char *sudo_uid_str = getenv("SUDO_UID");
-    char *sudo_gid_str = getenv("SUDO_GID");
-
-    if (sudo_uid_str && sudo_gid_str) {
-        // If run via sudo, use the original user's IDs from environment variables
-        host_uid = atoi(sudo_uid_str);
-        host_gid = atoi(sudo_gid_str);
-    } else {
-        // Otherwise, use the current process's IDs (e.g., if run directly as root)
-        host_uid = getuid();
-        host_gid = getgid();
-    }
-
+    uid_t host_uid = getuid();
+    gid_t host_gid = getgid();
 
     // Disable setgroups before writing to gid_map
     snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/setgroups", container_pid);

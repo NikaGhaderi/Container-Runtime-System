@@ -1,4 +1,4 @@
-#include <sys/shm.h>
+g#include <sys/shm.h>
 #include <stdio.h>
 #include <unistd.h>
 int main() {
