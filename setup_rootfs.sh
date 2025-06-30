@@ -12,6 +12,17 @@ mkdir -p /run/my_runtime
 echo "--> Enabling CPU, IO, and Memory cgroup controllers..."
 echo "+cpu +io +memory +pids" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null 2>&1 || true
 
+# We can also add the robust cleanup logic here for any leftover container rootfs
+# that might be using the old name, just in case.
+LEGACY_ROOTFS="my-container-rootfs"
+if [ -d "$LEGACY_ROOTFS" ]; then
+    echo "--> Found old rootfs. Cleaning up old mounts..."
+    while mountpoint -q "${LEGACY_ROOTFS}/proc" 2>/dev/null; do
+        echo "--> Unmounting a /proc layer from old rootfs..."
+        umount -f -l "${LEGACY_ROOTFS}/proc" || true
+        sleep 0.1
+    done
+fi
 
 # --- Part 2: Base Image Creation ---
 IMAGE_DIR="ubuntu-base-image"
@@ -30,6 +41,7 @@ COMMANDS=(
     "/bin/touch" "/bin/rm" "/bin/mkdir" "/bin/mount" "/bin/umount"
     "/bin/dd" "/usr/bin/free" "/usr/bin/head" "/usr/bin/tail" "/usr/bin/stress"
     "/usr/bin/whoami" "/usr/bin/ip" "/usr/bin/taskset" "/usr/bin/chrt"
+    "/usr/bin/hostname" "/usr/bin/ipcs" "/usr/bin/grep"
 )
 
 # Create the basic directory structure for the image
@@ -45,7 +57,40 @@ echo "nogroup:x:65534:" >> "${IMAGE_DIR}/etc/group"
 # Compile shm_writer and shm_reader if not already compiled
 if [ ! -f "shm_writer" ] || [ ! -f "shm_reader" ]; then
     echo "--> Compiling shm_writer and shm_reader..."
-    # (shm_writer and shm_reader C code omitted for brevity)
+    cat > shm_writer.c << 'EOF'
+#include <sys/shm.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#define SHM_KEY 1234
+#define SHM_SIZE 1024
+int main() {
+    int shmid = shmget(SHM_KEY, SHM_SIZE, IPC_CREAT | 0666);
+    if (shmid == -1) { perror("shmget"); return 1; }
+    char *data = shmat(shmid, NULL, 0);
+    if (data == (char *)-1) { perror("shmat"); return 1; }
+    strcpy(data, "Hello from writer!");
+    printf("Wrote to shared memory: %s\n", data);
+    sleep(10); // Wait for reader
+    shmdt(data);
+    return 0;
+}
+EOF
+    cat > shm_reader.c << 'EOF'
+#include <sys/shm.h>
+#include <stdio.h>
+#include <unistd.h>
+int main() {
+    int shmid = shmget(1234, 1024, 0666);
+    if (shmid == -1) { perror("shmget"); return 1; }
+    char *data = shmat(shmid, NULL, 0);
+    if (data == (char *)-1) { perror("shmat"); return 1; }
+    printf("Read from shared memory: %s\n", data);
+    shmdt(data);
+    shmctl(shmid, IPC_RMID, NULL); // Clean up
+    return 0;
+}
+EOF
     gcc -o shm_writer shm_writer.c
     gcc -o shm_reader shm_reader.c
 fi
@@ -60,7 +105,12 @@ copy_binary_with_deps() {
         echo "--> WARNING: Command not found: $source_path"
         return
     fi
-    local dest_binary="${IMAGE_DIR}${binary_path}"
+    local dest_binary="${IMAGE_DIR}/usr/bin/$binary_path"
+    if [ "$binary_path" = "shm_writer" ] || [ "$binary_path" = "shm_reader" ]; then
+        dest_binary="${IMAGE_DIR}/usr/bin/$binary_path"
+    else
+        dest_binary="${IMAGE_DIR}${binary_path}"
+    fi
     mkdir -p "$(dirname "$dest_binary")"
     cp "$source_path" "$dest_binary"
     for lib in $(ldd "$source_path" | awk 'NF == 4 {print $3}; NF == 2 {print $1}' | grep -v "not a dynamic executable"); do
