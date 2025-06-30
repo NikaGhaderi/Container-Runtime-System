@@ -656,6 +656,7 @@ int do_start(int argc, char *argv[]) {
     char cpu_quota[32] = {0}; 
     int pin_cpu_flag = 0;
     int share_ipc_flag = 0;
+    int original_detach_flag = 0;
     
     snprintf(path_buffer, sizeof(path_buffer), "%s/image_name", old_state_dir);
     read_file_string(path_buffer, image_name, sizeof(image_name));
@@ -666,6 +667,11 @@ int do_start(int argc, char *argv[]) {
     // Read the full command string, but don't modify it with strtok yet
     snprintf(path_buffer, sizeof(path_buffer), "%s/command", old_state_dir);
     read_file_string(path_buffer, command_str, sizeof(command_str));
+
+    snprintf(path_buffer, sizeof(path_buffer), "%s/detach", old_state_dir);
+    if (access(path_buffer, F_OK) == 0) {
+        original_detach_flag = 1;
+    }
 
     snprintf(path_buffer, sizeof(path_buffer), "%s/mem_limit", old_state_dir);
     read_file_string(path_buffer, mem_limit, sizeof(mem_limit));
@@ -826,7 +832,14 @@ int do_start(int argc, char *argv[]) {
     snprintf(new_pid_str, sizeof(new_pid_str), "%ld", (long)new_pid);
     write_file(procs_path, new_pid_str);
     
-    printf("Container %s started with new PID %ld\n", pid_str, (long)new_pid);
+    if (original_detach_flag) {
+        printf("Container %s started with new PID %ld\n", pid_str, (long)new_pid);
+        return 0;
+    } else {
+        printf("Container %s started with new PID %ld. Press Ctrl+C to stop.\n", pid_str, (long)new_pid);
+        waitpid(new_pid, NULL, 0);
+        printf("Container %ld has exited. Use 'rm' to clean up.\n", (long)new_pid);
+    }
     
     return 0;
 }
