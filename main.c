@@ -117,12 +117,12 @@ int container_main(void *arg) {
     struct container_args* args = (struct container_args*)arg;
 
     // Wait for parent to set up mappings
-    char buf;
-    if (read(args->sync_pipe_read_fd, &buf, 1) != 1) {
-        perror("Failed to read from sync pipe");
-        // Proceed anyway to avoid hanging, but log the error
-    }
-    close(args->sync_pipe_read_fd);
+//    char buf;
+//    if (read(args->sync_pipe_read_fd, &buf, 1) != 1) {
+//        perror("Failed to read from sync pipe");
+//        // Proceed anyway to avoid hanging, but log the error
+//    }
+//    close(args->sync_pipe_read_fd);
 
 
     // Bring up the loopback interface in the new network namespace.
