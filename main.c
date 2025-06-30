@@ -110,19 +110,19 @@ struct container_args {
     char* merged_path;
     char** argv;
     char* propagate_mount_dir;
-    int sync_pipe_read_fd; 
+    int sync_pipe_read_fd;
 };
 
 int container_main(void *arg) {
     struct container_args* args = (struct container_args*)arg;
 
     // Wait for parent to set up mappings
-//    char buf;
-//    if (read(args->sync_pipe_read_fd, &buf, 1) != 1) {
-//        perror("Failed to read from sync pipe");
-//        // Proceed anyway to avoid hanging, but log the error
-//    }
-//    close(args->sync_pipe_read_fd);
+   char buf;
+   if (read(args->sync_pipe_read_fd, &buf, 1) != 1) {
+       perror("Failed to read from sync pipe");
+       // Proceed anyway to avoid hanging, but log the error
+   }
+   close(args->sync_pipe_read_fd);
 
 
     // Bring up the loopback interface in the new network namespace.
@@ -267,45 +267,63 @@ int do_run(int argc, char *argv[]) {
     snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
     if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("Overlay mount failed"); return 1; }
 
-    struct container_args args;
+
+    // Create synchronization pipe
+    int sync_pipe[2];
+    if (pipe(sync_pipe) == -1) {
+        perror("pipe");
+        return 1;
+    }
+
+   struct container_args args;
     args.merged_path = merged;
     args.argv = container_cmd_argv;
     args.propagate_mount_dir = propagate_mount_dir;
+    args.sync_pipe_read_fd = sync_pipe[0]; // Pass read end to child
 
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
 
-    // MODIFIED: Added CLONE_NEWUSER and CLONE_NEWNET flags
     int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWUSER | CLONE_NEWNET | SIGCHLD;
     if (!share_ipc_flag) {
         clone_flags |= CLONE_NEWIPC;
     }
     pid_t container_pid = clone(container_main, stack_top, clone_flags, &args);
+    if (container_pid == -1) {
+        perror("clone");
+        free(container_stack);
+        close(sync_pipe[0]);
+        close(sync_pipe[1]);
+        return 1;
+    }
 
-    if (container_pid == -1) { perror("clone"); return 1; }
+    // Close read end in parent
+    close(sync_pipe[0]);
 
-    // ADDED: User Namespace Mapping Logic
-    // This maps the container's root user (0) to the host's current user.
+    // Set up user namespace mappings
     char path_buffer[PATH_MAX];
     uid_t host_uid = getuid();
     gid_t host_gid = getgid();
 
-    // Disable setgroups before writing to gid_map
     snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/setgroups", container_pid);
     write_file(path_buffer, "deny");
 
-    // Write GID map: map container GID 0 to host GID
     snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/gid_map", container_pid);
     char map_buffer[100];
     snprintf(map_buffer, sizeof(map_buffer), "0 %d 1", host_gid);
     write_file(path_buffer, map_buffer);
 
-    // Write UID map: map container UID 0 to host UID
     snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/uid_map", container_pid);
     snprintf(map_buffer, sizeof(map_buffer), "0 %d 1", host_uid);
     write_file(path_buffer, map_buffer);
-    // END ADDED LOGIC
 
+    // Signal child that mappings are set
+    if (write(sync_pipe[1], "1", 1) != 1) {
+        perror("write to sync pipe");
+    }
+    close(sync_pipe[1]); // Close write end
+
+    
     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
     char cgroup_path[PATH_MAX]; snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, container_pid);
     if(mkdir(cgroup_path, 0755) != 0 && errno != EEXIST) { perror("Failed to create container cgroup"); }
