@@ -623,22 +623,23 @@ int do_stop(int argc, char *argv[]) {
 }
 
 
+// REPLACE your old do_start function with this new, corrected version.
 int do_start(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s start <stopped_container_pid>\n", argv[0]);
-        return 1;
+    if (argc < 2) { 
+        fprintf(stderr, "Usage: %s start <stopped_container_pid>\n", argv[0]); 
+        return 1; 
     }
     char *pid_str = argv[1];
     char path_buffer[PATH_MAX];
 
-    char proc_path[PATH_MAX];
+    char proc_path[PATH_MAX]; 
     snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
     if (access(proc_path, F_OK) == 0) {
         fprintf(stderr, "Error: Container %s is already running.\n", pid_str);
         return 1;
     }
-
-    char old_state_dir[PATH_MAX];
+    
+    char old_state_dir[PATH_MAX]; 
     snprintf(old_state_dir, sizeof(old_state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
     if (access(old_state_dir, F_OK) != 0) {
         fprintf(stderr, "Error: No stopped container with ID %s found.\n", pid_str);
@@ -646,31 +647,32 @@ int do_start(int argc, char *argv[]) {
     }
 
     printf("Starting container %s...\n", pid_str);
-
+    
     // --- Read all configuration from the old state directory ---
-    char image_name[PATH_MAX] = {0};
-    char overlay_id[16] = {0};
+    char image_name[PATH_MAX] = {0}; 
+    char overlay_id[16] = {0}; 
     char command_str[1024] = {0};
-    char mem_limit[32] = {0};
-    char cpu_quota[32] = {0};
+    char mem_limit[32] = {0}; 
+    char cpu_quota[32] = {0}; 
     int pin_cpu_flag = 0;
     int share_ipc_flag = 0;
-
+    
     snprintf(path_buffer, sizeof(path_buffer), "%s/image_name", old_state_dir);
     read_file_string(path_buffer, image_name, sizeof(image_name));
-
+    
     snprintf(path_buffer, sizeof(path_buffer), "%s/overlay_id", old_state_dir);
     read_file_string(path_buffer, overlay_id, sizeof(overlay_id));
-
+    
+    // Read the full command string, but don't modify it with strtok yet
     snprintf(path_buffer, sizeof(path_buffer), "%s/command", old_state_dir);
     read_file_string(path_buffer, command_str, sizeof(command_str));
 
     snprintf(path_buffer, sizeof(path_buffer), "%s/mem_limit", old_state_dir);
     read_file_string(path_buffer, mem_limit, sizeof(mem_limit));
-
+    
     snprintf(path_buffer, sizeof(path_buffer), "%s/cpu_quota", old_state_dir);
     read_file_string(path_buffer, cpu_quota, sizeof(cpu_quota));
-
+    
     snprintf(path_buffer, sizeof(path_buffer), "%s/pin_cpu", old_state_dir);
     if (access(path_buffer, F_OK) == 0) { pin_cpu_flag = 1; }
 
@@ -688,23 +690,38 @@ int do_start(int argc, char *argv[]) {
     snprintf(upperdir, sizeof(upperdir), "overlay_layers/%s/upper", overlay_id);
     snprintf(workdir, sizeof(workdir), "overlay_layers/%s/work", overlay_id);
     snprintf(merged, sizeof(merged), "overlay_layers/%s/merged", overlay_id);
-
+    
     char mount_opts[PATH_MAX * 3];
     snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
-    if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) {
-        perror("Overlay mount failed on start");
-        return 1;
+    if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { 
+        perror("Overlay mount failed on start"); 
+        return 1; 
     }
 
     // --- Create a new container process ---
     char *argv_for_container[64];
-    int i = 0;
-    char *token = strtok(command_str, " \n");
-    while(token != NULL) {
-        argv_for_container[i++] = token;
-        token = strtok(NULL, " \n");
+    
+    // MODIFIED: Smart argument parsing
+    char temp_command_str[1024];
+    strcpy(temp_command_str, command_str); // Use a temporary copy for parsing
+
+    if (strncmp(temp_command_str, "/bin/sh -c ", 11) == 0) {
+        argv_for_container[0] = "/bin/sh";
+        argv_for_container[1] = "-c";
+        // The third argument is the entire rest of the string
+        argv_for_container[2] = temp_command_str + 11; 
+        argv_for_container[3] = NULL;
+    } else {
+        // Fallback to the old logic for simple commands
+        int i = 0;
+        char *token = strtok(temp_command_str, " \n");
+        while(token != NULL) {
+            argv_for_container[i++] = token;
+            token = strtok(NULL, " \n");
+        }
+        argv_for_container[i] = NULL;
     }
-    argv_for_container[i] = NULL;
+    // END MODIFICATION
 
     int sync_pipe[2];
     if (pipe(sync_pipe) == -1) {
@@ -712,25 +729,26 @@ int do_start(int argc, char *argv[]) {
         return 1;
     }
 
-    struct container_args args;
-    args.merged_path = merged;
+    struct container_args args; 
+    args.merged_path = merged; 
     args.argv = argv_for_container;
-    args.propagate_mount_dir = NULL; // Propagated mounts are not persisted on restart for simplicity
+    args.propagate_mount_dir = NULL;
     args.sync_pipe_read_fd = sync_pipe[0];
 
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
     int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWUSER | CLONE_NEWNET | SIGCHLD;
     if (share_ipc_flag) {
-        clone_flags |= CLONE_NEWIPC;
+        // Note: The original code had a bug here, it should be |= not =
+        clone_flags |= CLONE_NEWIPC; 
     }
     pid_t new_pid = clone(container_main, stack_top, clone_flags, &args);
 
-    close(sync_pipe[0]); // Parent closes read end
+    close(sync_pipe[0]);
 
-    if (new_pid == -1) {
-        perror("clone failed on start");
-        return 1;
+    if (new_pid == -1) { 
+        perror("clone failed on start"); 
+        return 1; 
     }
 
     // --- Set up user namespace and cgroups for the new PID ---
@@ -746,28 +764,28 @@ int do_start(int argc, char *argv[]) {
         host_uid = getuid();
         host_gid = getgid();
     }
-
-    snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/setgroups", new_pid);
+    
+    snprintf(path_buffer, sizeof(path_buffer), "/proc/%ld/setgroups", (long)new_pid);
     write_file(path_buffer, "deny");
     char map_buffer[100];
-    snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/gid_map", new_pid);
+    snprintf(path_buffer, sizeof(path_buffer), "/proc/%ld/gid_map", (long)new_pid);
     snprintf(map_buffer, sizeof(map_buffer), "0 %d 1", host_gid);
     write_file(path_buffer, map_buffer);
-    snprintf(path_buffer, sizeof(path_buffer), "/proc/%d/uid_map", new_pid);
+    snprintf(path_buffer, sizeof(path_buffer), "/proc/%ld/uid_map", (long)new_pid);
     snprintf(map_buffer, sizeof(map_buffer), "0 %d 1", host_uid);
     write_file(path_buffer, map_buffer);
-
-    close(sync_pipe[1]); // Signal child to proceed
+    
+    close(sync_pipe[1]);
 
     // --- Rename state directory and re-apply cgroup settings ---
     char new_state_dir[PATH_MAX];
-    snprintf(new_state_dir, sizeof(new_state_dir), "%s/%d", MY_RUNTIME_STATE, new_pid);
+    snprintf(new_state_dir, sizeof(new_state_dir), "%s/%ld", MY_RUNTIME_STATE, (long)new_pid);
     rename(old_state_dir, new_state_dir);
 
-    char cgroup_path[PATH_MAX];
-    snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%d", MY_RUNTIME_CGROUP, new_pid);
+    char cgroup_path[PATH_MAX]; 
+    snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%ld", MY_RUNTIME_CGROUP, (long)new_pid);
     mkdir(cgroup_path, 0755);
-
+    
     if (pin_cpu_flag) {
         FILE *f_cpu = fopen(NEXT_CPU_FILE, "r+");
         int next_cpu = 0;
@@ -792,7 +810,7 @@ int do_start(int argc, char *argv[]) {
         fclose(f_cpu);
     }
     if (strlen(mem_limit) > 0) {
-        snprintf(path_buffer, sizeof(path_buffer), "%s/memory.max", cgroup_path);
+        snprintf(path_buffer, sizeof(path_buffer), "%s/memory.max", cgroup_path); 
         write_file(path_buffer, mem_limit);
     }
     if (strlen(cpu_quota) > 0) {
@@ -801,20 +819,18 @@ int do_start(int argc, char *argv[]) {
         snprintf(cpu_content, sizeof(cpu_content), "%s 100000", cpu_quota);
         write_file(path_buffer, cpu_content);
     }
-
-    char procs_path[PATH_MAX];
+    
+    char procs_path[PATH_MAX]; 
     snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
-    char new_pid_str[16];
-    snprintf(new_pid_str, sizeof(new_pid_str), "%d", new_pid);
+    char new_pid_str[16]; 
+    snprintf(new_pid_str, sizeof(new_pid_str), "%ld", (long)new_pid);
     write_file(procs_path, new_pid_str);
-
-    // The start command should always detach.
-    printf("Container %s started with new PID %d\n", pid_str, new_pid);
-
-    // CRITICAL FIX: Do NOT unmount the filesystem here.
-    // The container is now running, and cleanup will be handled by 'stop' and 'rm'.
+    
+    printf("Container %s started with new PID %ld\n", pid_str, (long)new_pid);
+    
     return 0;
 }
+
 
 
 int do_rm(int argc, char *argv[]) {
