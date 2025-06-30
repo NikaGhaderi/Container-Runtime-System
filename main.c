@@ -22,6 +22,20 @@
 #define NEXT_CPU_FILE "/tmp/my_runtime_next_cpu"
 
 // --- Helper Functions ---
+void read_file_string(const char *path, char *buf, size_t size) {
+    FILE *f = fopen(path, "r");
+    if (f) {
+        if (fgets(buf, size, f) != NULL) {
+            buf[strcspn(buf, "\n")] = 0; // Remove trailing newline
+        } else {
+            buf[0] = '\0'; // Clear buffer on read error
+        }
+        fclose(f);
+    } else {
+        buf[0] = '\0'; // Clear buffer if file doesn't exist
+    }
+}
+
 void cleanup_mounts(int pid) {
     char state_dir[PATH_MAX];
     snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, pid);
@@ -475,6 +489,104 @@ int do_status(int argc, char *argv[]) {
     printf("\n----------------------------------\n");
     return 0;
 }
+
+// // REPLACE your old do_status function with this new, more detailed version.
+//int do_status(int argc, char *argv[]) {
+//    if (argc < 2) {
+//        fprintf(stderr, "Usage: %s status <container_pid>\n", argv[0]);
+//        return 1;
+//    }
+//    char *pid_str = argv[1];
+//    char path_buffer[PATH_MAX], format_buffer[64], content_buffer[1024];
+//
+//    char state_dir[PATH_MAX];
+//    snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
+//    if (access(state_dir, F_OK) != 0) {
+//        fprintf(stderr, "Error: No container with PID %s found.\n", pid_str);
+//        return 1;
+//    }
+//
+//    printf("--- Status for Container PID %s ---\n", pid_str);
+//
+//    // --- State ---
+//    char proc_path[PATH_MAX];
+//    snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
+//    const char* status_str = "Stopped";
+//    if (access(proc_path, F_OK) == 0) {
+//        status_str = "Running";
+//        char freeze_path[PATH_MAX];
+//        snprintf(freeze_path, sizeof(freeze_path), "%s/container_%s/cgroup.freeze", MY_RUNTIME_CGROUP, pid_str);
+//        if (read_cgroup_long(freeze_path) == 1) {
+//            status_str = "Frozen";
+//        }
+//    }
+//    printf("%-20s: %s\n", "State", status_str);
+//
+//    // --- Details ---
+//    snprintf(path_buffer, sizeof(path_buffer), "%s/image_name", state_dir);
+//    read_file_string(path_buffer, content_buffer, sizeof(content_buffer));
+//    printf("%-20s: %s\n", "Image", content_buffer);
+//
+//    snprintf(path_buffer, sizeof(path_buffer), "%s/command", state_dir);
+//    read_file_string(path_buffer, content_buffer, sizeof(content_buffer));
+//    printf("%-20s: %s\n", "Command", content_buffer);
+//
+//    printf("\n--- Resources ---\n");
+//    char cgroup_path[PATH_MAX];
+//    snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
+//
+//    // Memory
+//    snprintf(path_buffer, sizeof(path_buffer), "%s/memory.current", cgroup_path);
+//    long mem_current = read_cgroup_long(path_buffer);
+//    format_bytes(mem_current, format_buffer, sizeof(format_buffer));
+//    snprintf(path_buffer, sizeof(path_buffer), "%s/mem_limit", state_dir);
+//    read_file_string(path_buffer, content_buffer, sizeof(content_buffer));
+//    printf("%-20s: %s / %s\n", "Memory Usage", format_buffer, strlen(content_buffer) > 0 ? content_buffer : "No Limit");
+//
+//    // CPU
+//    snprintf(path_buffer, sizeof(path_buffer), "%s/cpu.stat", cgroup_path);
+//    long cpu_micros = find_cgroup_value(path_buffer, "usage_usec");
+//    snprintf(path_buffer, sizeof(path_buffer), "%s/cpu_quota", state_dir);
+//    read_file_string(path_buffer, content_buffer, sizeof(content_buffer));
+//    printf("%-20s: %.2f s (Quota: %s)\n", "Total CPU Time", (double)cpu_micros / 1000000.0, strlen(content_buffer) > 0 ? content_buffer : "No Limit");
+//
+//    // PIDs
+//    snprintf(path_buffer, sizeof(path_buffer), "%s/pids.current", cgroup_path);
+//    long pids_current = read_cgroup_long(path_buffer);
+//    printf("%-20s: %ld\n", "Active Processes", pids_current);
+//
+//    // I/O
+//    long rbytes = -1, wbytes = -1;
+//    snprintf(path_buffer, sizeof(path_buffer), "%s/io.stat", cgroup_path);
+//    FILE* io_stat_file = fopen(path_buffer, "r");
+//    if (io_stat_file) {
+//        char line[256];
+//        while (fgets(line, sizeof(line), io_stat_file)) {
+//            char *ptr;
+//            if ((ptr = strstr(line, "rbytes="))) sscanf(ptr, "rbytes=%ld", &rbytes);
+//            if ((ptr = strstr(line, "wbytes="))) sscanf(ptr, "wbytes=%ld", &wbytes);
+//        }
+//        fclose(io_stat_file);
+//    }
+//    format_bytes(rbytes, format_buffer, sizeof(format_buffer));
+//    printf("%-20s: %s\n", "Bytes Read", format_buffer);
+//    format_bytes(wbytes, format_buffer, sizeof(format_buffer));
+//    printf("%-20s: %s\n", "Bytes Written", format_buffer);
+//
+//    printf("\n--- Configuration ---\n");
+//    snprintf(path_buffer, sizeof(path_buffer), "%s/pin_cpu", state_dir);
+//    printf("%-20s: %s\n", "CPU Pinning", access(path_buffer, F_OK) == 0 ? "Enabled" : "Disabled");
+//
+//    snprintf(path_buffer, sizeof(path_buffer), "%s/share_ipc", state_dir);
+//    printf("%-20s: %s\n", "Shared IPC", access(path_buffer, F_OK) == 0 ? "Enabled" : "Disabled");
+//
+//    snprintf(path_buffer, sizeof(path_buffer), "%s/propagate_mount_dir", state_dir);
+//    read_file_string(path_buffer, content_buffer, sizeof(content_buffer));
+//    printf("%-20s: %s\n", "Propagated Mount", strlen(content_buffer) > 0 ? content_buffer : "Disabled");
+//
+//    printf("\n----------------------------------\n");
+//    return 0;
+//}
 
 int do_freeze(int argc, char *argv[]) {
     if (argc < 2) { fprintf(stderr, "Usage: %s freeze <container_pid>\n", argv[0]); return 1; }
