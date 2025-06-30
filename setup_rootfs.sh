@@ -29,7 +29,7 @@ COMMANDS=(
     "/bin/bash" "/bin/ls" "/bin/cat" "/bin/echo" "/bin/ps" "/bin/sleep"
     "/bin/touch" "/bin/rm" "/bin/mkdir" "/bin/mount" "/bin/umount"
     "/bin/dd" "/usr/bin/free" "/usr/bin/head" "/usr/bin/tail" "/usr/bin/stress"
-    "/usr/bin/whoami" "/usr/bin/ip"
+    "/usr/bin/whoami" "/usr/bin/ip" "/usr/bin/taskset" "/usr/bin/chrt"
 )
 
 # Create the basic directory structure for the image
