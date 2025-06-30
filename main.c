@@ -76,15 +76,36 @@ void cleanup_mounts(int pid) {
 
 
 void write_file(const char *path, const char *content) {
-    FILE *f = fopen(path, "w");
-    if (f == NULL) {
-        fprintf(stderr, "ERROR: Failed to open %s for writing: ", path);
+    int fd = open(path, O_WRONLY | O_CREAT, 0644);
+    if (fd == -1) {
+        fprintf(stderr, "DEBUG ERROR: Failed to open/create %s: ", path);
         perror("");
         return;
     }
-    fprintf(f, "%s", content);
-    fclose(f);
+    ssize_t bytes_written = write(fd, content, strlen(content));
+    if (bytes_written == -1) {
+        fprintf(stderr, "DEBUG ERROR: Failed to write to %s: ", path);
+        perror("");
+    }
+    close(fd);
 }
+
+// ADDED: The missing function definition
+// Helper to read a string from a file into a buffer
+void read_file_string(const char *path, char *buf, size_t size) {
+    FILE *f = fopen(path, "r");
+    if (f) {
+        if (fgets(buf, size, f) != NULL) {
+            buf[strcspn(buf, "\n")] = 0; // Remove newline
+        } else {
+            buf[0] = '\0'; // Clear buffer on read error
+        }
+        fclose(f);
+    } else {
+        buf[0] = '\0'; // Clear buffer if file doesn't exist
+    }
+}
+
 
 void setup_cgroup_hierarchy() {
     mkdir(MY_RUNTIME_CGROUP, 0755);
@@ -96,14 +117,19 @@ struct container_args {
     char* merged_path;
     char** argv;
     char* propagate_mount_dir;
+    int sync_pipe_read_fd; 
 };
-
 
 int container_main(void *arg) {
     struct container_args* args = (struct container_args*)arg;
+    char c;
 
-    // Bring up the loopback interface in the new network namespace.
-    // This is necessary to have a functional, albeit isolated, network environment.
+    if (read(args->sync_pipe_read_fd, &c, 1) != 0) {
+        fprintf(stderr, "Child failed to sync with parent\n");
+        return 1;
+    }
+    close(args->sync_pipe_read_fd);
+
     if (system("ip link set lo up") != 0) {
         perror("Failed to set lo up");
     }
@@ -111,7 +137,7 @@ int container_main(void *arg) {
     if (args->propagate_mount_dir) {
         char container_mount_path[PATH_MAX];
         char command[PATH_MAX * 2];
-
+        
         snprintf(container_mount_path, sizeof(container_mount_path), "%s%s", args->merged_path, args->propagate_mount_dir);
 
         snprintf(command, sizeof(command), "mkdir -p %s", container_mount_path);
@@ -128,7 +154,7 @@ int container_main(void *arg) {
     if (chroot(args->merged_path) != 0) { perror("chroot failed"); return 1; }
     if (chdir("/") != 0) { perror("chdir failed"); return 1; }
     if (mount("proc", "/proc", "proc", 0, NULL) != 0) { perror("mount proc failed"); }
-
+    
     execv(args->argv[0], args->argv);
     perror("execv failed");
     return 1;
@@ -149,6 +175,10 @@ void format_bytes(long bytes, char *buf, size_t size) {
     double d_bytes = bytes;
     if (bytes < 0) {
         snprintf(buf, size, "N/A");
+        return;
+    }
+    if (bytes == 0) {
+        snprintf(buf, size, "0 B");
         return;
     }
     while (d_bytes >= 1024 && i < 4) {
