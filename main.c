@@ -21,18 +21,19 @@
 #define MY_RUNTIME_STATE "/run/my_runtime"
 #define NEXT_CPU_FILE "/tmp/my_runtime_next_cpu"
 
-// --- Helper Functions ---
+// ---------- Helper functions -----------
+
 void read_file_string(const char *path, char *buf, size_t size) {
     FILE *f = fopen(path, "r");
     if (f) {
         if (fgets(buf, size, f) != NULL) {
-            buf[strcspn(buf, "\n")] = 0; // Remove trailing newline
+            buf[strcspn(buf, "\n")] = 0; 
         } else {
-            buf[0] = '\0'; // Clear buffer on read error
+            buf[0] = '\0'; 
         }
         fclose(f);
     } else {
-        buf[0] = '\0'; // Clear buffer if file doesn't exist
+        buf[0] = '\0'; 
     }
 }
 
@@ -53,21 +54,21 @@ void cleanup_mounts(int pid) {
         char proc_to_unmount[PATH_MAX];
         snprintf(proc_to_unmount, sizeof(proc_to_unmount), "%s/proc", merged);
 
-        // Unmount /proc with lazy detach
+        
         if (umount2(proc_to_unmount, MNT_DETACH) != 0) {
             if (errno != ENOENT && errno != EINVAL) {
                 perror("umount2 proc failed");
             }
         }
 
-        // ADDED: Unmount the propagated mount if it exists
+        
         char propagate_mount_path[PATH_MAX];
         snprintf(propagate_mount_path, sizeof(propagate_mount_path), "%s/propagate_mount_dir", state_dir);
         FILE* p_file = fopen(propagate_mount_path, "r");
         if (p_file) {
             char p_dir[PATH_MAX];
             if (fgets(p_dir, sizeof(p_dir), p_file)) {
-                p_dir[strcspn(p_dir, "\n")] = 0; // Remove newline
+                p_dir[strcspn(p_dir, "\n")] = 0; 
                 char container_mount_point[PATH_MAX];
                 snprintf(container_mount_point, sizeof(container_mount_point), "%s%s", merged, p_dir);
                 if (umount2(container_mount_point, MNT_DETACH) != 0) {
@@ -79,7 +80,7 @@ void cleanup_mounts(int pid) {
             fclose(p_file);
         }
 
-        // Unmount overlay with lazy detach
+        
         if (umount2(merged, MNT_DETACH) != 0) {
             if (errno != ENOENT && errno != EINVAL) {
                 perror("umount2 overlay failed");
@@ -116,17 +117,13 @@ struct container_args {
 int container_main(void *arg) {
     struct container_args* args = (struct container_args*)arg;
 
-    // Wait for parent to set up mappings
     char buf;
     if (read(args->sync_pipe_read_fd, &buf, 1) != 1) {
-        perror("Failed to read from sync pipe");
-        // Proceed anyway to avoid hanging, but log the error
+        perror("Failed to read from sync pipe");        
     }
     close(args->sync_pipe_read_fd);
 
 
-    // Bring up the loopback interface in the new network namespace.
-    // This is necessary to have a functional, albeit isolated, network environment.
     if (system("ip link set lo up") != 0) {
         perror("Failed to set lo up");
     }
@@ -201,7 +198,7 @@ long find_cgroup_value(const char* path, const char* key) {
 }
 
 
-// --- CLI Command Functions ---
+// ---------- CLI commands -----------
 
 int do_run(int argc, char *argv[]) {
     setup_cgroup_hierarchy();
@@ -267,8 +264,6 @@ int do_run(int argc, char *argv[]) {
     snprintf(mount_opts, sizeof(mount_opts), "lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir);
     if (mount("overlay", merged, "overlay", 0, mount_opts) != 0) { perror("Overlay mount failed"); return 1; }
 
-
-    // Create synchronization pipe
     int sync_pipe[2];
     if (pipe(sync_pipe) == -1) {
         perror("pipe");
@@ -279,7 +274,7 @@ int do_run(int argc, char *argv[]) {
     args.merged_path = merged;
     args.argv = container_cmd_argv;
     args.propagate_mount_dir = propagate_mount_dir;
-    args.sync_pipe_read_fd = sync_pipe[0]; // Pass read end to child
+    args.sync_pipe_read_fd = sync_pipe[0]; 
 
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
@@ -297,10 +292,8 @@ int do_run(int argc, char *argv[]) {
         return 1;
     }
 
-    // Close read end in parent
     close(sync_pipe[0]);
-
-    // Set up user namespace mappings
+    
     char path_buffer[PATH_MAX];
     uid_t host_uid = getuid();
     gid_t host_gid = getgid();
@@ -317,11 +310,11 @@ int do_run(int argc, char *argv[]) {
     snprintf(map_buffer, sizeof(map_buffer), "0 %d 1", host_uid);
     write_file(path_buffer, map_buffer);
 
-    // Signal child that mappings are set
+    
     if (write(sync_pipe[1], "1", 1) != 1) {
         perror("write to sync pipe");
     }
-    close(sync_pipe[1]); // Close write end
+    close(sync_pipe[1]); 
 
 
     char state_dir[PATH_MAX]; snprintf(state_dir, sizeof(state_dir), "%s/%d", MY_RUNTIME_STATE, container_pid); mkdir(state_dir, 0755);
@@ -445,7 +438,6 @@ int do_list(int argc, char *argv[]) {
             continue;
 
         if (!found) {
-            // Print header only once, and only if we find at least one container
             printf("%-15s\t%-10s\t%s\n", "CONTAINER PID", "STATUS", "COMMAND");
             found = 1;
         }
@@ -489,7 +481,7 @@ int do_status(int argc, char *argv[]) {
         cmd_buf[strcspn(cmd_buf, "\n")] = 0; printf("%-25s: %s\n", "Command", cmd_buf); fclose(f);
     }
 
-    // ADDED: Display propagated mount in status
+    
     snprintf(path_buffer, sizeof(path_buffer), "%s/propagate_mount_dir", state_dir);
     f = fopen(path_buffer, "r");
     if (f) {
@@ -517,104 +509,6 @@ int do_status(int argc, char *argv[]) {
     return 0;
 }
 
-// // REPLACE your old do_status function with this new, more detailed version.
-//int do_status(int argc, char *argv[]) {
-//    if (argc < 2) {
-//        fprintf(stderr, "Usage: %s status <container_pid>\n", argv[0]);
-//        return 1;
-//    }
-//    char *pid_str = argv[1];
-//    char path_buffer[PATH_MAX], format_buffer[64], content_buffer[1024];
-//
-//    char state_dir[PATH_MAX];
-//    snprintf(state_dir, sizeof(state_dir), "%s/%s", MY_RUNTIME_STATE, pid_str);
-//    if (access(state_dir, F_OK) != 0) {
-//        fprintf(stderr, "Error: No container with PID %s found.\n", pid_str);
-//        return 1;
-//    }
-//
-//    printf("--- Status for Container PID %s ---\n", pid_str);
-//
-//    // --- State ---
-//    char proc_path[PATH_MAX];
-//    snprintf(proc_path, sizeof(proc_path), "/proc/%s", pid_str);
-//    const char* status_str = "Stopped";
-//    if (access(proc_path, F_OK) == 0) {
-//        status_str = "Running";
-//        char freeze_path[PATH_MAX];
-//        snprintf(freeze_path, sizeof(freeze_path), "%s/container_%s/cgroup.freeze", MY_RUNTIME_CGROUP, pid_str);
-//        if (read_cgroup_long(freeze_path) == 1) {
-//            status_str = "Frozen";
-//        }
-//    }
-//    printf("%-20s: %s\n", "State", status_str);
-//
-//    // --- Details ---
-//    snprintf(path_buffer, sizeof(path_buffer), "%s/image_name", state_dir);
-//    read_file_string(path_buffer, content_buffer, sizeof(content_buffer));
-//    printf("%-20s: %s\n", "Image", content_buffer);
-//
-//    snprintf(path_buffer, sizeof(path_buffer), "%s/command", state_dir);
-//    read_file_string(path_buffer, content_buffer, sizeof(content_buffer));
-//    printf("%-20s: %s\n", "Command", content_buffer);
-//
-//    printf("\n--- Resources ---\n");
-//    char cgroup_path[PATH_MAX];
-//    snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
-//
-//    // Memory
-//    snprintf(path_buffer, sizeof(path_buffer), "%s/memory.current", cgroup_path);
-//    long mem_current = read_cgroup_long(path_buffer);
-//    format_bytes(mem_current, format_buffer, sizeof(format_buffer));
-//    snprintf(path_buffer, sizeof(path_buffer), "%s/mem_limit", state_dir);
-//    read_file_string(path_buffer, content_buffer, sizeof(content_buffer));
-//    printf("%-20s: %s / %s\n", "Memory Usage", format_buffer, strlen(content_buffer) > 0 ? content_buffer : "No Limit");
-//
-//    // CPU
-//    snprintf(path_buffer, sizeof(path_buffer), "%s/cpu.stat", cgroup_path);
-//    long cpu_micros = find_cgroup_value(path_buffer, "usage_usec");
-//    snprintf(path_buffer, sizeof(path_buffer), "%s/cpu_quota", state_dir);
-//    read_file_string(path_buffer, content_buffer, sizeof(content_buffer));
-//    printf("%-20s: %.2f s (Quota: %s)\n", "Total CPU Time", (double)cpu_micros / 1000000.0, strlen(content_buffer) > 0 ? content_buffer : "No Limit");
-//
-//    // PIDs
-//    snprintf(path_buffer, sizeof(path_buffer), "%s/pids.current", cgroup_path);
-//    long pids_current = read_cgroup_long(path_buffer);
-//    printf("%-20s: %ld\n", "Active Processes", pids_current);
-//
-//    // I/O
-//    long rbytes = -1, wbytes = -1;
-//    snprintf(path_buffer, sizeof(path_buffer), "%s/io.stat", cgroup_path);
-//    FILE* io_stat_file = fopen(path_buffer, "r");
-//    if (io_stat_file) {
-//        char line[256];
-//        while (fgets(line, sizeof(line), io_stat_file)) {
-//            char *ptr;
-//            if ((ptr = strstr(line, "rbytes="))) sscanf(ptr, "rbytes=%ld", &rbytes);
-//            if ((ptr = strstr(line, "wbytes="))) sscanf(ptr, "wbytes=%ld", &wbytes);
-//        }
-//        fclose(io_stat_file);
-//    }
-//    format_bytes(rbytes, format_buffer, sizeof(format_buffer));
-//    printf("%-20s: %s\n", "Bytes Read", format_buffer);
-//    format_bytes(wbytes, format_buffer, sizeof(format_buffer));
-//    printf("%-20s: %s\n", "Bytes Written", format_buffer);
-//
-//    printf("\n--- Configuration ---\n");
-//    snprintf(path_buffer, sizeof(path_buffer), "%s/pin_cpu", state_dir);
-//    printf("%-20s: %s\n", "CPU Pinning", access(path_buffer, F_OK) == 0 ? "Enabled" : "Disabled");
-//
-//    snprintf(path_buffer, sizeof(path_buffer), "%s/share_ipc", state_dir);
-//    printf("%-20s: %s\n", "Shared IPC", access(path_buffer, F_OK) == 0 ? "Enabled" : "Disabled");
-//
-//    snprintf(path_buffer, sizeof(path_buffer), "%s/propagate_mount_dir", state_dir);
-//    read_file_string(path_buffer, content_buffer, sizeof(content_buffer));
-//    printf("%-20s: %s\n", "Propagated Mount", strlen(content_buffer) > 0 ? content_buffer : "Disabled");
-//
-//    printf("\n----------------------------------\n");
-//    return 0;
-//}
-
 int do_freeze(int argc, char *argv[]) {
     if (argc < 2) { fprintf(stderr, "Usage: %s freeze <container_pid>\n", argv[0]); return 1; }
     char *pid_str = argv[1]; char freeze_path[PATH_MAX];
@@ -639,9 +533,9 @@ int do_stop(int argc, char *argv[]) {
     if (kill(pid, SIGKILL) != 0) {
         perror("kill failed");
     } else {
-        // Wait for process to exit
+        
         waitpid(pid, NULL, 0);
-        // Clean up mounts after stopping
+        
         cleanup_mounts(pid);
     }
     printf("Container %d stopped.\n", pid);
@@ -649,7 +543,7 @@ int do_stop(int argc, char *argv[]) {
 }
 
 
-// REPLACE your old do_start function with this new, corrected version.
+
 int do_start(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s start <stopped_container_pid>\n", argv[0]);
@@ -673,8 +567,7 @@ int do_start(int argc, char *argv[]) {
     }
 
     printf("Starting container %s...\n", pid_str);
-
-    // --- Read all configuration from the old state directory ---
+    
     char image_name[PATH_MAX] = {0};
     char overlay_id[16] = {0};
     char command_str[1024] = {0};
@@ -690,8 +583,7 @@ int do_start(int argc, char *argv[]) {
 
     snprintf(path_buffer, sizeof(path_buffer), "%s/overlay_id", old_state_dir);
     read_file_string(path_buffer, overlay_id, sizeof(overlay_id));
-
-    // Read the full command string, but don't modify it with strtok yet
+    
     snprintf(path_buffer, sizeof(path_buffer), "%s/command", old_state_dir);
     read_file_string(path_buffer, command_str, sizeof(command_str));
 
@@ -711,13 +603,30 @@ int do_start(int argc, char *argv[]) {
 
     snprintf(path_buffer, sizeof(path_buffer), "%s/share_ipc", old_state_dir);
     if (access(path_buffer, F_OK) == 0) { share_ipc_flag = 1; }
+    
+    snprintf(path_buffer, sizeof(path_buffer), "%s/propagate_mount_dir", old_state_dir);
+    read_file_string(path_buffer, propagate_mount_dir, sizeof(propagate_mount_dir));
 
     if (strlen(image_name) == 0 || strlen(overlay_id) == 0 || strlen(command_str) == 0) {
         fprintf(stderr, "Error: Container configuration is corrupt or missing.\n");
         return 1;
     }
 
-    // --- Re-mount the overlay filesystem ---
+    
+    if (strlen(propagate_mount_dir) > 0) {
+        if (mount(NULL, propagate_mount_dir, NULL, MS_REC | MS_SHARED, NULL) != 0) {
+            perror("Failed to set mount propagation to SHARED");
+            fprintf(stderr, "Hint: Make sure the directory '%s' exists and is a mount point.\n", propagate_mount_dir);
+            return 1;
+        }
+    }
+
+
+    if (strlen(image_name) == 0 || strlen(overlay_id) == 0 || strlen(command_str) == 0) {
+        fprintf(stderr, "Error: Container configuration is corrupt or missing.\n");
+        return 1;
+    }
+
     char lowerdir[PATH_MAX], upperdir[PATH_MAX], workdir[PATH_MAX], merged[PATH_MAX];
     snprintf(lowerdir, sizeof(lowerdir), "%s", image_name);
     snprintf(upperdir, sizeof(upperdir), "overlay_layers/%s/upper", overlay_id);
@@ -731,21 +640,21 @@ int do_start(int argc, char *argv[]) {
         return 1;
     }
 
-    // --- Create a new container process ---
+    
     char *argv_for_container[64];
 
-    // MODIFIED: Smart argument parsing
+    
     char temp_command_str[1024];
-    strcpy(temp_command_str, command_str); // Use a temporary copy for parsing
+    strcpy(temp_command_str, command_str); 
 
     if (strncmp(temp_command_str, "/bin/sh -c ", 11) == 0) {
         argv_for_container[0] = "/bin/sh";
         argv_for_container[1] = "-c";
-        // The third argument is the entire rest of the string
+        
         argv_for_container[2] = temp_command_str + 11;
         argv_for_container[3] = NULL;
     } else {
-        // Fallback to the old logic for simple commands
+        
         int i = 0;
         char *token = strtok(temp_command_str, " \n");
         while(token != NULL) {
@@ -754,7 +663,6 @@ int do_start(int argc, char *argv[]) {
         }
         argv_for_container[i] = NULL;
     }
-    // END MODIFICATION
 
     int sync_pipe[2];
     if (pipe(sync_pipe) == -1) {
@@ -765,13 +673,14 @@ int do_start(int argc, char *argv[]) {
     struct container_args args;
     args.merged_path = merged;
     args.argv = argv_for_container;
-    args.propagate_mount_dir = NULL;
+
+    args.propagate_mount_dir = strlen(propagate_mount_dir) > 0 ? propagate_mount_dir : NULL; 
     args.sync_pipe_read_fd = sync_pipe[0];
 
     char *container_stack = malloc(STACK_SIZE);
     char *stack_top = container_stack + STACK_SIZE;
     int clone_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWNET | SIGCHLD;
-    if (!share_ipc_flag) { // Fix the logic to match do_run
+    if (!share_ipc_flag) { 
         clone_flags |= CLONE_NEWIPC;
     }
     pid_t new_pid = clone(container_main, stack_top, clone_flags, &args);
@@ -785,7 +694,6 @@ int do_start(int argc, char *argv[]) {
 
     close(sync_pipe[0]);
 
-    // Set up user namespace and cgroups for the new PID
     uid_t host_uid;
     gid_t host_gid;
     char *sudo_uid_str = getenv("SUDO_UID");
@@ -808,14 +716,12 @@ int do_start(int argc, char *argv[]) {
     snprintf(path_buffer, sizeof(path_buffer), "/proc/%ld/uid_map", (long)new_pid);
     snprintf(map_buffer, sizeof(map_buffer), "0 %d 1", host_uid);
     write_file(path_buffer, map_buffer);
-
-    // Signal child that mappings are set
+    
     if (write(sync_pipe[1], "1", 1) != 1) {
         perror("write to sync pipe");
     }
-    close(sync_pipe[1]); // Close write end
-
-    // --- Rename state directory and re-apply cgroup settings ---
+    close(sync_pipe[1]); 
+    
     char new_state_dir[PATH_MAX];
     snprintf(new_state_dir, sizeof(new_state_dir), "%s/%ld", MY_RUNTIME_STATE, (long)new_pid);
     rename(old_state_dir, new_state_dir);
@@ -909,7 +815,6 @@ int do_rm(int argc, char *argv[]) {
     }
     snprintf(command, sizeof(command), "rm -rf %s", state_dir);
     system(command);
-    // Remove the cgroup directory
     char cgroup_dir[PATH_MAX];
     snprintf(cgroup_dir, sizeof(cgroup_dir), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
     if (rmdir(cgroup_dir) != 0) {
