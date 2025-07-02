@@ -1,6 +1,0 @@
-2025-06-28 20:44:28 | PID: 8501    | COMM: my_runner       | SYSCALL: mkdir (cgroup)
-2025-06-28 20:44:28 | PID: 8501    | COMM: my_runner       | SYSCALL: clone (new ns)
-2025-06-28 20:44:28 | PID: 8501    | COMM: my_runner       | SYSCALL: mkdir (cgroup)
-2025-06-28 20:45:19 | PID: 8583    | COMM: my_runner       | SYSCALL: mkdir (cgroup)
-2025-06-28 20:45:19 | PID: 8583    | COMM: my_runner       | SYSCALL: clone (new ns)
-2025-06-28 20:45:19 | PID: 8583    | COMM: my_runner       | SYSCALL: mkdir (cgroup)
