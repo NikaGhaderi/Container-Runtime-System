@@ -33,7 +33,7 @@ Follow these steps to get the project running.
 **1. Clone the Repository**
 
 ```bash
-git clone [https://github.com/NikaGhaderi/Container-Runtime-System.git](https://github.com/NikaGhaderi/Container-Runtime-System.git)
+git clone https://github.com/NikaGhaderi/Container-Runtime-System.git
 cd Container-Runtime-System
 ```
 
