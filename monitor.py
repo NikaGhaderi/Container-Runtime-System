@@ -3,7 +3,6 @@ from bcc import BPF
 import ctypes as ct
 import time
 
-# This is our eBPF program written in C, using separate, stable tracepoints.
 bpf_text = """
 #include <linux/sched.h>
 #include <uapi/linux/bpf.h>
@@ -21,17 +20,15 @@ BPF_PERF_OUTPUT(events);
 
 // --- PROBE 1: For the 'clone' syscall ---
 TRACEPOINT_PROBE(syscalls, sys_enter_clone) {
-    // MODIFIED: Added a filter to only trace 'my_runner'
     char comm[TASK_COMM_LEN];
     bpf_get_current_comm(&comm, sizeof(comm));
 
     char target_comm[] = "my_runner";
     for (int i = 0; i < sizeof(target_comm) - 1; ++i) {
         if (comm[i] != target_comm[i]) {
-            return 0; // Not our process, so we ignore it
+            return 0;
         }
     }
-    // END MODIFICATION
 
     unsigned long clone_flags = args->clone_flags;
     if (clone_flags & (CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET)) {
@@ -49,17 +46,15 @@ TRACEPOINT_PROBE(syscalls, sys_enter_clone) {
 
 // --- PROBE 2: For the 'mkdir' syscall ---
 TRACEPOINT_PROBE(syscalls, sys_enter_mkdir) {
-    // MODIFIED: Added a filter to only trace 'my_runner'
     char comm[TASK_COMM_LEN];
     bpf_get_current_comm(&comm, sizeof(comm));
 
     char target_comm[] = "my_runner";
     for (int i = 0; i < sizeof(target_comm) - 1; ++i) {
         if (comm[i] != target_comm[i]) {
-            return 0; // Not our process, ignore it
+            return 0;
         }
     }
-    // END MODIFICATION
 
     const char* path = (const char*)args->pathname;
     char cgroup_path[] = "/sys/fs/cgroup";
@@ -68,7 +63,7 @@ TRACEPOINT_PROBE(syscalls, sys_enter_mkdir) {
 
     for (int i = 0; i < sizeof(cgroup_path) - 1; ++i) {
         if (path_buf[i] != cgroup_path[i]) {
-            return 0; // Not a cgroup path, ignore it
+            return 0;
         }
     }
 
@@ -84,13 +79,11 @@ TRACEPOINT_PROBE(syscalls, sys_enter_mkdir) {
 }
 """
 
-# The Python data structure for receiving the event
 class Data(ct.Structure):
     _fields_ = [
         ("pid", ct.c_uint), ("comm", ct.c_char * 16), ("syscall_name", ct.c_char * 32),
     ]
 
-# The callback function that processes the event
 def print_event(cpu, data, size):
     event = ct.cast(data, ct.POINTER(Data)).contents
     current_time = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -103,7 +96,6 @@ def print_event(cpu, data, size):
 
 print("Starting eBPF monitoring... Press Ctrl+C to exit.")
 try:
-    # Added cflags to suppress the macro redefinition warnings
     cflags = ["-Wno-macro-redefined"]
     b = BPF(text=bpf_text, cflags=cflags)
     

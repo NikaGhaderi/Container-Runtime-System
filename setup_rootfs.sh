@@ -6,14 +6,10 @@ echo "--> Ensuring runtime directories exist..."
 mkdir -p /sys/fs/cgroup/my_runtime
 mkdir -p /run/my_runtime
 
-# ADDED: Enable cgroup v2 controllers at the root level.
-# This is a prerequisite for creating child cgroups with these controllers.
-# The command might fail if already configured, so we ignore errors.
+
 echo "--> Enabling CPU, IO, and Memory cgroup controllers..."
 echo "+cpu +io +memory +pids" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null 2>&1 || true
 
-# We can also add the robust cleanup logic here for any leftover container rootfs
-# that might be using the old name, just in case.
 LEGACY_ROOTFS="my-container-rootfs"
 if [ -d "$LEGACY_ROOTFS" ]; then
     echo "--> Found old rootfs. Cleaning up old mounts..."
@@ -44,17 +40,14 @@ COMMANDS=(
     "/usr/bin/hostname" "/usr/bin/ipcs" "/usr/bin/grep"
 )
 
-# Create the basic directory structure for the image
 mkdir -p "${IMAGE_DIR}"/{bin,lib,lib64,usr/bin,proc,tmp,dev,etc,root}
 
-# Create minimal /etc/passwd and /etc/group for user mapping
 echo "--> Creating /etc/passwd and /etc/group"
 echo "root:x:0:0:root:/root:/bin/bash" > "${IMAGE_DIR}/etc/passwd"
 echo "root:x:0:" > "${IMAGE_DIR}/etc/group"
 echo "nogroup:x:65534:" >> "${IMAGE_DIR}/etc/group"
 
 
-# Compile shm_writer and shm_reader if not already compiled
 if [ ! -f "shm_writer" ] || [ ! -f "shm_reader" ]; then
     echo "--> Compiling shm_writer and shm_reader..."
     cat > shm_writer.c << 'EOF'
@@ -123,20 +116,16 @@ copy_binary_with_deps() {
     done
 }
 
-# Copy standard commands
 for cmd in "${COMMANDS[@]}"; do
     copy_binary_with_deps "$cmd"
 done
 
-# Copy shm_writer and shm_reader
 copy_binary_with_deps "shm_writer"
 copy_binary_with_deps "shm_reader"
 
-# Create /bin/sh symlink to /bin/bash
 echo "--> Creating /bin/sh symlink to /bin/bash..."
 ln -sf /bin/bash "${IMAGE_DIR}/bin/sh"
 
-# Create device nodes
 echo "--> Creating device nodes in ${IMAGE_DIR}/dev..."
 mknod -m 666 "${IMAGE_DIR}/dev/zero" c 1 5
 mknod -m 660 "${IMAGE_DIR}/dev/sda" b 8 0
