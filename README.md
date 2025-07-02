@@ -182,3 +182,11 @@ A helper script is provided to stop and remove all existing containers, which is
     ```bash
     ./cleanup.sh
     ```
+
+---
+
+## Get in Touch
+
+This project was created by **Nika Ghaderi** as part of a university course on operating systems. Feel free to reach out with any questions, feedback, or suggestions!
+
+**Email:** `nika_ghaderi@yahoo.com`
