@@ -24,7 +24,10 @@ Before you begin, ensure your system meets the following requirements:
   ```bash
   sudo apt-get update
   sudo apt-get install -y bpfcc-tools python3-bpfcc
-
+- **Test Utilities**: The `stress` utility is required for some tests. You can install it with:
+  ```bash
+  sudo apt-get update
+  sudo apt-get install stress
 
 ## Installation and Setup
 
