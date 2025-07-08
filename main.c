@@ -576,7 +576,7 @@ int do_start(int argc, char *argv[]) {
     int pin_cpu_flag = 0;
     int share_ipc_flag = 0;
     int original_detach_flag = 0;
-    char propagate_mount_dir[PATH_MAX] = {0}
+    char propagate_mount_dir[PATH_MAX] = {0};
 
     snprintf(path_buffer, sizeof(path_buffer), "%s/image_name", old_state_dir);
     read_file_string(path_buffer, image_name, sizeof(image_name));

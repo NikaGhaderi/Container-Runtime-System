@@ -37,7 +37,7 @@ COMMANDS=(
     "/bin/touch" "/bin/rm" "/bin/mkdir" "/bin/mount" "/bin/umount"
     "/bin/dd" "/usr/bin/free" "/usr/bin/head" "/usr/bin/tail" "/usr/bin/stress"
     "/usr/bin/whoami" "/usr/bin/ip" "/usr/bin/taskset" "/usr/bin/chrt"
-    "/usr/bin/hostname" "/usr/bin/ipcs" "/usr/bin/grep"
+    "/usr/bin/hostname" "/usr/bin/ipcs" "/usr/bin/grep" "/usr/bin/top"
 )
 
 mkdir -p "${IMAGE_DIR}"/{bin,lib,lib64,usr/bin,proc,tmp,dev,etc,root}
