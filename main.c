@@ -726,6 +726,14 @@ int do_start(int argc, char *argv[]) {
     snprintf(new_state_dir, sizeof(new_state_dir), "%s/%ld", MY_RUNTIME_STATE, (long)new_pid);
     rename(old_state_dir, new_state_dir);
 
+    char old_cgroup_path[PATH_MAX];
+    snprintf(old_cgroup_path, sizeof(old_cgroup_path), "%s/container_%s", MY_RUNTIME_CGROUP, pid_str);
+    if (rmdir(old_cgroup_path) != 0) {
+        if (errno != ENOENT) {
+            perror("Failed to remove old cgroup directory");
+        }
+    }
+
     char cgroup_path[PATH_MAX];
     snprintf(cgroup_path, sizeof(cgroup_path), "%s/container_%ld", MY_RUNTIME_CGROUP, (long)new_pid);
     mkdir(cgroup_path, 0755);

@@ -2,3 +2,5 @@
 
 # Ignore the container root filesystem directory
 /my-container-rootfs/
+/ubuntu-base-image
+/cmake-build-debug
