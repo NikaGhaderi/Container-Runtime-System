@@ -720,7 +720,6 @@ int do_start(int argc, char *argv[]) {
     if (write(sync_pipe[1], "1", 1) != 1) {
         perror("write to sync pipe");
     }
-    close(sync_pipe[1]); 
     
     char new_state_dir[PATH_MAX];
     snprintf(new_state_dir, sizeof(new_state_dir), "%s/%ld", MY_RUNTIME_STATE, (long)new_pid);
@@ -771,6 +770,8 @@ int do_start(int argc, char *argv[]) {
         snprintf(cpu_content, sizeof(cpu_content), "%s 100000", cpu_quota);
         write_file(path_buffer, cpu_content);
     }
+
+    close(sync_pipe[1]);
 
     char procs_path[PATH_MAX];
     snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
